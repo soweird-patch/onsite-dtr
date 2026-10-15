@@ -1,0 +1,13 @@
+.env
+.env.local
+.convex/
+data/
+.qa-data/
+dist/
+node_modules/
+public/
+server.js
+tests/
+scripts/
+PRODUCT_FLOW.md
+README.md

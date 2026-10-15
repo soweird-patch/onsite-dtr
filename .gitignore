@@ -1,0 +1,13 @@
+data/
+.qa-data/
+.env
+node_modules/
+
+.env.local
+dist/
+.convex/
+.vercel/
+
+.vercel
+.env*
+!.env.example
