@@ -1,5 +1,5 @@
-const CACHE = 'onsite-dtr-shell-v4';
-const SHELL = ['/', '/index.html', '/app.css', '/app.js?v=3', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/aoda-login-hero.png'];
+const CACHE = 'onsite-dtr-shell-v5';
+const SHELL = ['/', '/index.html', '/app.css', '/app.js', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/aoda-login-hero.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
 });

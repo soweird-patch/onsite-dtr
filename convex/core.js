@@ -1,7 +1,7 @@
 import { query, mutation, internalQuery, internalMutation } from './_generated/server.js';
 import { internal } from './_generated/api.js';
 import { v } from 'convex/values';
-import { cutoffFor, holidayFor, localDateTime, shiftInstant, workBreakdown } from '../rules.js';
+import { cutoffFor, groupPunches, holidayFor, localDateTime, shiftInstant, workBreakdownIntervals } from '../rules.js';
 import { audit, authUser, dateRange, dayNow, digest, distanceMeters, localTimeToUtc,
   now, punchView, safeDate, settings, settingsDefault, settingsView, timezone,
   userView, validateEmployee, validEmail } from './lib.js';
@@ -16,7 +16,16 @@ async function userByMobile(ctx, mobile) {
 }
 async function punchFor(ctx, userId, date, slot) {
   const rows = await ctx.db.query('punches').withIndex('by_user_date', q => q.eq('userId', userId).eq('workDate', date)).collect();
-  return rows.find(p => p.slot === slot && p.active);
+  return rows.find(p => p.slot === slot && (p.segment || 1) === 1 && p.active);
+}
+async function activeDayPunches(ctx, userId, date) {
+  const rows = await ctx.db.query('punches').withIndex('by_user_date', q => q.eq('userId', userId).eq('workDate', date)).collect();
+  return rows.filter(row => row.active);
+}
+function breakdownForDay(date, punches, continuedAt) {
+  return workBreakdownIntervals(date, groupPunches(punches).map(group => ({
+    inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc
+  })), continuedAt);
 }
 async function extensionFor(ctx, userId, date) {
   return ctx.db.query('extensions').withIndex('by_user_date', q => q.eq('userId', userId).eq('workDate', date)).unique();
@@ -320,6 +329,90 @@ export const backfill = mutation({ args: { ...tokenArg, input: v.any() }, handle
   return { ok: true, replaced };
 }});
 
+export const saveAdminAttendanceDay = mutation({ args: { ...tokenArg, input: v.any() }, handler: async (ctx, { token, input }) => {
+  const admin = await authUser(ctx, token, 'admin');
+  const targetId = ctx.db.normalizeId('users', String(input.employeeId || ''));
+  const target = targetId && await ctx.db.get(targetId);
+  if (!target || target.role !== 'employee') throw new Error('Employee not found.');
+  if (!safeDate(input.workDate)) throw new Error('Valid work date is required.');
+  const reason = String(input.reason || '').trim();
+  if (reason.length < 5 || reason.length > 300) throw new Error('Reason must have 5–300 characters.');
+  if (!Array.isArray(input.segments) || !input.segments.length || input.segments.length > 6)
+    throw new Error('Enter one to six work intervals.');
+  const existing = await activeDayPunches(ctx, target._id, input.workDate);
+  const expectedIds = Array.isArray(input.expectedIds) ? input.expectedIds.map(String).sort() : [];
+  if (expectedIds.length !== existing.length ||
+      expectedIds.some((id, index) => id !== existing.map(row => String(row._id)).sort()[index]))
+    throw new Error('Attendance changed after this form opened. Reload this workday before saving.');
+  const oldByKey = new Map(existing.map(row => [`${row.segment || 1}|${row.slot}`, row]));
+  if (oldByKey.size !== existing.length) throw new Error('Duplicate punches need admin review before editing.');
+  const entries = [];
+  let previousOut = null;
+  for (const [index, segment] of input.segments.entries()) {
+    const number = index + 1;
+    const timeIn = String(segment.timeIn || '');
+    const timeOut = String(segment.timeOut || '');
+    if (!timeIn || (number > 1 && !timeOut)) throw new Error(`Interval ${number} needs both Time In and Time Out.`);
+    if (timeOut && !timeIn) throw new Error(`Interval ${number} needs Time In before Time Out.`);
+    if (number === 1 && segment.timeInNextDay) throw new Error('The first Time In must be on the work date.');
+    if (segment.timeInNextDay && timeIn > '06:00') throw new Error('Next-day Time In must be no later than 6:00 AM.');
+    if (segment.timeOutNextDay && timeOut > '06:00') throw new Error('Next-day Time Out must be no later than 6:00 AM.');
+    const inUtc = shiftInstant(input.workDate, timeIn, !!segment.timeInNextDay);
+    const outUtc = timeOut ? shiftInstant(input.workDate, timeOut, !!segment.timeOutNextDay) : null;
+    if (outUtc && outUtc <= inUtc) throw new Error(`Interval ${number}: Time Out must be after Time In.`);
+    if (previousOut && inUtc <= previousOut) throw new Error(`Interval ${number} must start after the previous Time Out.`);
+    if (number > 1 && !previousOut) throw new Error('Finish the previous interval before adding another.');
+    if (outUtc && outUtc > shiftInstant(input.workDate, '06:00', true))
+      throw new Error('Time Out cannot exceed the 6:00 AM next-day cutoff.');
+    const offsite = !!segment.offsite;
+    entries.push({ number, slot: 'IN', timeUtc: inUtc, id: segment.inId || null, offsite });
+    if (outUtc) entries.push({ number, slot: 'OUT', timeUtc: outUtc, id: segment.outId || null, offsite });
+    previousOut = outUtc;
+  }
+  const submittedOldIds = entries.map(entry => entry.id).filter(Boolean).map(String).sort();
+  if (submittedOldIds.length !== existing.length || submittedOldIds.some((id, index) => id !== expectedIds[index]))
+    throw new Error('Existing punches cannot be removed here. Reload and edit their times instead.');
+  let created = 0, replaced = 0, preserved = 0;
+  for (const entry of entries) {
+    const old = oldByKey.get(`${entry.number}|${entry.slot}`);
+    if ((old ? String(old._id) : null) !== entry.id)
+      throw new Error('Attendance changed after this form opened. Reload this workday before saving.');
+    const oldLocal = old ? localDateTime(old.timeUtc, timezone) : null;
+    const newLocal = localDateTime(entry.timeUtc, timezone);
+    if (old && oldLocal.date === newLocal.date && oldLocal.time === newLocal.time) { preserved++; continue; }
+    if (old) {
+      await ctx.db.patch(old._id, { active: false });
+      await audit(ctx, admin._id, 'punch_replaced', 'punch', old._id,
+        { reason, segment: entry.number, slot: entry.slot, replacementTime: entry.timeUtc });
+      replaced++;
+    }
+    const id = await ctx.db.insert('punches', { userId: target._id, workDate: input.workDate,
+      segment: entry.number, slot: entry.slot, method: 'ADMIN', timeUtc: entry.timeUtc,
+      submittedAt: now(), note: reason, verification: 'APPROVED',
+      assignmentType: entry.offsite ? 'OFFSITE' : 'ONSITE', createdBy: admin._id, active: true });
+    await audit(ctx, admin._id, 'admin_punch_create', 'punch', id,
+      { reason, segment: entry.number, slot: entry.slot, replacedId: old?._id || null });
+    created++;
+  }
+  const active = await activeDayPunches(ctx, target._id, input.workDate);
+  const extension = await extensionFor(ctx, target._id, input.workDate);
+  const offsiteAfterFive = groupPunches(active).some(group => group.outPunch &&
+    group.outPunch.timeUtc > shiftInstant(input.workDate, '17:00') &&
+    (group.outPunch.method === 'OFFSITE' || group.outPunch.assignmentType === 'OFFSITE'));
+  if (offsiteAfterFive && !extension && (created || replaced)) {
+    const id = await ctx.db.insert('extensions', { userId: target._id, workDate: input.workDate,
+      continuedAt: shiftInstant(input.workDate, '17:00'), source: 'ADMIN', note: reason,
+      overtimeDecision: 'PENDING', nightDecision: 'PENDING' });
+    await audit(ctx, admin._id, 'admin_extension_create', 'extension', id, { reason });
+  } else if (extension && (created || replaced)) {
+    await ctx.db.patch(extension._id, { overtimeDecision: 'PENDING', nightDecision: 'PENDING',
+      overtimeReason: undefined, nightReason: undefined, overtimeReviewedAt: undefined,
+      nightReviewedAt: undefined, overtimeReviewedBy: undefined, nightReviewedBy: undefined });
+    await audit(ctx, admin._id, 'extension_reset_after_correction', 'extension', extension._id, { reason });
+  }
+  return { ok: true, created, replaced, preserved };
+}});
+
 export const verify = mutation({ args: { ...tokenArg, id: v.string(), verification: v.string(), reason: v.optional(v.string()) }, handler: async (ctx, args) => {
   const admin = await authUser(ctx, args.token, 'admin');
   if (!['APPROVED', 'REJECTED'].includes(args.verification)) throw new Error('Choose Approve or Reject.');
@@ -350,18 +443,19 @@ export const approveAttendanceDay = mutation({
     if (!userId || !safeDate(args.workDate)) throw new Error('Invalid employee or work date.');
     const employee = await ctx.db.get(userId);
     if (!employee || employee.role !== 'employee') throw new Error('Employee not found.');
-    const inPunch = await punchFor(ctx, userId, args.workDate, 'IN');
-    const outPunch = await punchFor(ctx, userId, args.workDate, 'OUT');
-    if (!inPunch || !outPunch) throw new Error('Both Time In and Time Out are required before approval.');
+    const punches = await activeDayPunches(ctx, userId, args.workDate);
+    const segments = groupPunches(punches);
+    if (!segments.length || segments.some(segment => !segment.inPunch || !segment.outPunch))
+      throw new Error('Both Time In and Time Out are required for every interval before approval.');
     const reviewedAt = now();
-    for (const punch of [inPunch, outPunch]) {
+    for (const punch of punches) {
       if (['ONSITE', 'OFFSITE'].includes(punch.method)) {
         await ctx.db.patch(punch._id, { verification: 'APPROVED', rejectionReason: undefined,
           reviewedBy: admin._id, reviewedAt });
       }
     }
     await audit(ctx, admin._id, 'attendance_day_approve', 'attendance_day', `${userId}|${args.workDate}`,
-      { userId, workDate: args.workDate, punchIds: [inPunch._id, outPunch._id] });
+      { userId, workDate: args.workDate, punchIds: punches.map(punch => punch._id) });
     return { ok: true, workDate: args.workDate };
   }
 });
@@ -375,20 +469,22 @@ export const reviewExtension = mutation({ args: { ...tokenArg, id: v.string(), s
     if (reason.length > 300) throw new Error('Reason must be at most 300 characters.');
     const id = ctx.db.normalizeId('extensions', args.id), extension = id && await ctx.db.get(id);
     if (!extension) throw new Error('Offsite extension not found.');
-    const inPunch = await punchFor(ctx, extension.userId, extension.workDate, 'IN');
-    const outPunch = await punchFor(ctx, extension.userId, extension.workDate, 'OUT');
-    if (!inPunch || !outPunch) throw new Error('Wait for Time Out before reviewing extra hours.');
-    const breakdown = workBreakdown(extension.workDate, inPunch.timeUtc, outPunch.timeUtc, extension.continuedAt);
+    const punches = await activeDayPunches(ctx, extension.userId, extension.workDate);
+    const segments = groupPunches(punches);
+    if (!segments.length || segments.some(segment => !segment.inPunch || !segment.outPunch))
+      throw new Error('Wait for Time Out in every interval before reviewing extra hours.');
+    const breakdown = breakdownForDay(extension.workDate, punches, extension.continuedAt);
     if (args.stage === 'OVERTIME' && !breakdown.overtimeEligible)
       throw new Error('Overtime starts after 8 paid regular hours and needs at least 60 extra minutes.');
     if (args.stage === 'NIGHT' && !breakdown.nightCandidateMinutes)
       throw new Error('No Differential hours were recorded.');
     if (args.stage === 'NIGHT' && extension.overtimeDecision !== 'APPROVED')
       throw new Error('Approve overtime before reviewing Differential.');
-    if (args.decision === 'APPROVED' &&
-        (inPunch.verification !== 'APPROVED' || outPunch.verification !== 'APPROVED'))
+    if (args.decision === 'APPROVED' && punches.some(punch => punch.verification !== 'APPROVED'))
       throw new Error('Approve the employee Time In and Time Out proofs first.');
-    if (args.decision === 'APPROVED' && outPunch.method === 'ADMIN' && outPunch.assignmentType !== 'OFFSITE')
+    if (args.decision === 'APPROVED' && extension.source === 'ADMIN' &&
+        !segments.some(segment => segment.outPunch?.method === 'ADMIN' && segment.outPunch.assignmentType === 'OFFSITE' &&
+          segment.outPunch.timeUtc > shiftInstant(extension.workDate, '17:00')))
       throw new Error('Admin-created overtime needs an offsite Time Out assignment.');
     const changes = args.stage === 'OVERTIME'
       ? { overtimeDecision: args.decision, overtimeReason: reason || undefined,

@@ -32,7 +32,7 @@ export function userView(row) {
 
 export function punchView(row, name) {
   return { id: row._id, userId: row.userId, employeeName: name,
-    workDate: row.workDate, slot: row.slot, method: row.method, timeUtc: row.timeUtc,
+    workDate: row.workDate, slot: row.slot, segment: row.segment || 1, method: row.method, timeUtc: row.timeUtc,
     submittedAt: row.submittedAt, latitude: row.latitude ?? null, longitude: row.longitude ?? null,
     accuracyM: row.accuracyM ?? null, distanceM: row.distanceM ?? null,
     hasSelfie: !!row.selfieId, note: row.note, verification: row.verification,

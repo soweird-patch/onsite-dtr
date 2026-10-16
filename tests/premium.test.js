@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { approveAttendanceDay, autoTimeOut, backfill, continueOffsite, reviewExtension, verify } from '../convex/core.js';
+import { approveAttendanceDay, autoTimeOut, backfill, continueOffsite, reviewExtension,
+  saveAdminAttendanceDay, verify } from '../convex/core.js';
 import { shiftInstant } from '../rules.js';
 
 function fixture() {
@@ -119,6 +120,68 @@ test('replace existing overwrites matching same-day punches and preserves audit 
   assert.equal(punches.find(row => row.active && row.slot === 'IN').timeUtc, shiftInstant(date, '09:00'));
   assert.equal(punches.find(row => row.active && row.slot === 'OUT').timeUtc, shiftInstant(date, '18:00'));
   assert.equal([...f.tables.audit.values()].filter(row => row.action === 'punch_replaced').length, 2);
+});
+
+test('admin keeps existing proof, adds a return-to-work pair, and edits one punch', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  await backfill._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: date,
+    timeIn: '08:00', timeOut: '20:00', offsite: true, reason: 'First field assignment' } });
+  const first = [...f.tables.punches.values()].filter(row => row.active);
+  const segment = (timeOut = '23:00', outId = null) => ({ timeIn: '21:00', timeOut,
+    inId: f.tables.punches.size > 2 ? [...f.tables.punches.values()].find(row => row.segment === 2 && row.slot === 'IN' && row.active)?._id : null,
+    outId, offsite: true });
+  const primary = { timeIn: '08:00', timeOut: '20:00', inId: first.find(row => row.slot === 'IN')._id,
+    outId: first.find(row => row.slot === 'OUT')._id, offsite: true };
+  const save = input => saveAdminAttendanceDay._handler(f.ctx, { token: f.token, input });
+  const base = { employeeId: userId, workDate: date, reason: 'Urgent return to client site' };
+  const added = await save({ ...base, expectedIds: first.map(row => row._id), segments: [primary, segment()] });
+  assert.deepEqual({ created: added.created, replaced: added.replaced, preserved: added.preserved },
+    { created: 2, replaced: 0, preserved: 2 });
+  assert.equal([...f.tables.punches.values()].filter(row => row.active).length, 4);
+  const extension = [...f.tables.extensions.values()][0];
+  await approveAttendanceDay._handler(f.ctx, { token: f.token, userId, workDate: date });
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id, stage: 'OVERTIME', decision: 'APPROVED' });
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id, stage: 'NIGHT', decision: 'APPROVED' });
+  const active = [...f.tables.punches.values()].filter(row => row.active);
+  const secondOut = active.find(row => row.segment === 2 && row.slot === 'OUT');
+  const corrected = await save({ ...base, expectedIds: active.map(row => row._id),
+    segments: [primary, segment('23:30', secondOut._id)] });
+  assert.deepEqual({ created: corrected.created, replaced: corrected.replaced, preserved: corrected.preserved },
+    { created: 1, replaced: 1, preserved: 3 });
+  assert.equal((await f.ctx.db.get(secondOut._id)).active, false);
+  assert.equal(extension.nightDecision, 'PENDING');
+  await assert.rejects(save({ ...base, expectedIds: first.map(row => row._id),
+    segments: [primary, segment()] }), /Attendance changed/);
+  const latest = [...f.tables.punches.values()].filter(row => row.active);
+  const invalidSecond = { ...segment('22:00', latest.find(row => row.segment === 2 && row.slot === 'OUT')._id), timeIn: '19:30' };
+  await assert.rejects(save({ ...base, expectedIds: latest.map(row => row._id),
+    segments: [primary, invalidSecond] }), /start after the previous Time Out/);
+});
+
+test('unchanged employee punches keep selfie and GPS when admin adds another interval', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  const inId = await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'IN',
+    method: 'OFFSITE', timeUtc: shiftInstant(date, '08:00'), selfieId: 'photo-in',
+    latitude: 14.5, longitude: 120.9, verification: 'APPROVED', active: true });
+  const outId = await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'OUT',
+    method: 'OFFSITE', timeUtc: shiftInstant(date, '20:00'), selfieId: 'photo-out',
+    latitude: 14.6, longitude: 121, verification: 'APPROVED', active: true });
+  const result = await saveAdminAttendanceDay._handler(f.ctx, { token: f.token, input: {
+    employeeId: userId, workDate: date, reason: 'Return to urgent field assignment', expectedIds: [inId, outId],
+    segments: [
+      { inId, outId, timeIn: '08:00', timeOut: '20:00', offsite: true },
+      { timeIn: '21:00', timeOut: '22:30', offsite: true }
+    ]
+  } });
+  assert.equal(result.preserved, 2);
+  assert.equal((await f.ctx.db.get(inId)).selfieId, 'photo-in');
+  assert.equal((await f.ctx.db.get(outId)).longitude, 121);
+  assert.equal((await f.ctx.db.get(outId)).active, true);
+  assert.equal([...f.tables.punches.values()].filter(row => row.active).length, 4);
 });
 
 test('system auto-closes an open continued shift at 6 AM exactly once', async () => {

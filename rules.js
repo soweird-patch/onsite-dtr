@@ -113,6 +113,59 @@ export function workBreakdown(date, inUtc, outUtc, continuedAtUtc = null) {
     nightCandidateMinutes, overtimeEligible };
 }
 
+export function groupPunches(punches = []) {
+  const groups = new Map();
+  for (const punch of punches) {
+    const number = punch.segment || 1;
+    if (!groups.has(number)) groups.set(number, { number, inPunch: null, outPunch: null });
+    groups.get(number)[punch.slot === 'IN' ? 'inPunch' : 'outPunch'] = punch;
+  }
+  return [...groups.values()].sort((a, b) => a.number - b.number);
+}
+
+export function isPayrollDayReady(punches) {
+  const segments = groupPunches(punches);
+  return segments.length > 0 && segments.every(({ inPunch, outPunch }) => isPayrollReady(inPunch, outPunch));
+}
+
+// Count only time inside recorded work intervals. Gaps between punches never earn hours.
+export function workBreakdownIntervals(date, intervals, continuedAtUtc = null) {
+  const complete = intervals.filter(item => item.inUtc && item.outUtc)
+    .map(item => ({ start: Date.parse(item.inUtc), end: Date.parse(item.outUtc) }))
+    .filter(item => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start)
+    .sort((a, b) => a.start - b.start);
+  if (complete.length === 1) return workBreakdown(date, new Date(complete[0].start).toISOString(),
+    new Date(complete[0].end).toISOString(), continuedAtUtc);
+  if (!complete.length) return workBreakdown(date, null, null, continuedAtUtc);
+  const regularStart = Date.parse(shiftInstant(date, REGULAR_START));
+  const regularEnd = Date.parse(shiftInstant(date, REGULAR_END));
+  const overtimeEnd = Date.parse(shiftInstant(date, OVERTIME_END));
+  const nightEnd = Date.parse(shiftInstant(date, NIGHT_END, true));
+  const previousDate = new Date(Date.parse(`${date}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+  const earlyNightStart = Date.parse(shiftInstant(previousDate, OVERTIME_END));
+  const earlyNightEnd = Date.parse(shiftInstant(date, NIGHT_END));
+  const beforeFive = complete.reduce((sum, item) => sum + overlapMinutes(item.start, item.end, regularStart, regularEnd), 0);
+  let regularMinutes = Math.min(REQUIRED_REGULAR_MINUTES, beforeFive);
+  let completionAt = regularMinutes === REQUIRED_REGULAR_MINUTES ? regularEnd : Infinity;
+  for (const item of complete) {
+    const start = Math.max(item.start, regularEnd), end = Math.min(item.end, overtimeEnd);
+    if (end <= start || regularMinutes === REQUIRED_REGULAR_MINUTES) continue;
+    const recovery = Math.min(REQUIRED_REGULAR_MINUTES - regularMinutes, Math.floor((end - start) / 60000));
+    regularMinutes += recovery;
+    if (regularMinutes === REQUIRED_REGULAR_MINUTES) completionAt = start + recovery * 60000;
+  }
+  const undertimeMinutes = REQUIRED_REGULAR_MINUTES - regularMinutes;
+  const continuedAt = continuedAtUtc ? Date.parse(continuedAtUtc) : NaN;
+  const overtimeStart = Math.max(regularEnd, completionAt, continuedAt);
+  const overtimeCandidateMinutes = Number.isFinite(continuedAt) && regularMinutes === REQUIRED_REGULAR_MINUTES
+    ? complete.reduce((sum, item) => sum + overlapMinutes(item.start, item.end, overtimeStart, nightEnd), 0) : 0;
+  const nightCandidateMinutes = complete.reduce((sum, item) => sum +
+    overlapMinutes(item.start, item.end, earlyNightStart, earlyNightEnd) +
+    overlapMinutes(item.start, item.end, overtimeEnd, nightEnd), 0);
+  return { regularMinutes, undertimeMinutes, overtimeCandidateMinutes, nightCandidateMinutes,
+    overtimeEligible: overtimeCandidateMinutes >= MIN_OVERTIME_MINUTES };
+}
+
 export function holidayFor(date, holidays = []) {
   return holidays.find(holiday => holiday.date === date) || null;
 }

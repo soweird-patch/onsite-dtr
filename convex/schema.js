@@ -26,6 +26,7 @@ export default defineSchema({
   }).index('by_key', ['key']),
   punches: defineTable({
     userId: v.id('users'), workDate: v.string(), slot: v.union(v.literal('IN'), v.literal('OUT')),
+    segment: v.optional(v.number()),
     method: v.union(v.literal('ONSITE'), v.literal('OFFSITE'), v.literal('ADMIN'), v.literal('SYSTEM')),
     timeUtc: v.string(), submittedAt: v.string(), latitude: v.optional(v.number()),
     longitude: v.optional(v.number()), accuracyM: v.optional(v.number()),

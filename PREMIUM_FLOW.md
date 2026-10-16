@@ -6,7 +6,7 @@ This is the DTR's recording and approval workflow. It records time for payroll r
 
 | Window | Recorded rule | Approval |
 | --- | --- | --- |
-| 8:00 AM–5:00 PM | Up to 9 regular hours; the break is included. A Time Out before 5:00 PM creates undertime. | Actual Time In/Out and proof status remain visible. |
+| 8:00 AM–5:00 PM | Up to 8 credited regular hours; the 12:00–1:00 PM break is included in a continuous shift. Recorded gaps between separate punch intervals do not count. | Actual Time In/Out and proof status remain visible. |
 | 5:00–10:00 PM | Offsite overtime starts when the employee taps **Continue overtime**. The counted interval begins no earlier than that tap. Less than 60 minutes is regular-day exit only. | Admin grants or denies eligible overtime after reviewing offsite punch proof. |
 | 10:00 PM–6:00 AM | Differential is recorded separately and never counts toward the eight regular hours. | Early Differential is included when the daily attendance is approved. Differential attached to an offsite continuation is reviewed after overtime is granted. |
 
@@ -22,7 +22,7 @@ This is the DTR's recording and approval workflow. It records time for payroll r
 1. In **Records**, inspect the offsite Time In and Time Out proof and approve or reject each offsite punch.
 2. In **Overtime & Differential review**, grant or deny eligible overtime. A reason is optional and saved in the audit trail. Granting requires both punch proofs to be approved.
 3. If Differential minutes exist on an offsite continuation, grant or deny them separately. Differential grant requires overtime grant. Rejecting a punch or overtime removes that continuation's premium credit.
-4. For a no-signal assignment, **Add attendance** takes employee, work date, In/Out, an offsite checkbox, and a required reason. Check “next day” for an exit after midnight. The app calculates eligible extra hours and opens Records for approval. No manual minute math or selfie is required for admin-created attendance.
+4. In **Add attendance**, selecting an employee and work date loads that day's active punches into editable fields. Unchanged times keep their original selfie, GPS, and verification. An edited time becomes an audited admin correction. Use **Add another Time In / Time Out** when the employee returns to work after an earlier Time Out; mark an overnight punch as next day and any new field interval as offsite. The gaps between intervals are excluded from worked hours. A reason is required, while selfie and GPS are optional for admin-created punches.
 5. **Reports** prints or saves a PDF for the selected cutoff. Each employee has dated actual punches, regular hours, late and undertime, granted overtime and Differential, review states, and totals. Pending and denied premium minutes are excluded from granted totals; the exceptions remain visible for review.
 
 Corrections retain the old punch in the audit history and reset extra-hour approvals. Existing administrator-entered overtime from the previous version remains visible as already granted in reports.

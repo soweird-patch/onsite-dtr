@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cutoffFor, distanceMeters, attendanceMinutes, isPayrollReady, workBreakdown, shiftInstant } from '../rules.js';
+import { cutoffFor, distanceMeters, attendanceMinutes, isPayrollDayReady, isPayrollReady,
+  workBreakdown, workBreakdownIntervals, shiftInstant } from '../rules.js';
 
 test('payroll includes only a complete admin-approved attendance day', () => {
   assert.equal(isPayrollReady({ verification: 'APPROVED' }, { verification: 'APPROVED' }), true);
@@ -83,4 +84,22 @@ test('night differential stops at 6 AM and early exit is undertime', () => {
   const overnight = workBreakdown(date, shiftInstant(date, '08:00'), shiftInstant(date, '07:00', true), shiftInstant(date, '17:00'));
   assert.equal(overnight.overtimeCandidateMinutes, 780);
   assert.equal(overnight.nightCandidateMinutes, 480);
+});
+
+test('return-to-work interval excludes the gap and appears in overtime and differential', () => {
+  const date = '2026-10-15', continued = shiftInstant(date, '17:00');
+  const intervals = [
+    { inUtc: shiftInstant(date, '08:00'), outUtc: shiftInstant(date, '20:00') },
+    { inUtc: shiftInstant(date, '21:00'), outUtc: shiftInstant(date, '23:00') }
+  ];
+  assert.deepEqual(workBreakdownIntervals(date, intervals, continued), {
+    regularMinutes: 480, undertimeMinutes: 0, overtimeCandidateMinutes: 300,
+    nightCandidateMinutes: 60, overtimeEligible: true
+  });
+  assert.equal(isPayrollDayReady([
+    { segment: 1, slot: 'IN', verification: 'APPROVED' },
+    { segment: 1, slot: 'OUT', verification: 'APPROVED' },
+    { segment: 2, slot: 'IN', verification: 'PENDING' },
+    { segment: 2, slot: 'OUT', verification: 'APPROVED' }
+  ]), false);
 });

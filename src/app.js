@@ -1,6 +1,7 @@
 import { ConvexHttpClient } from 'convex/browser';
 import { api as functions } from '../convex/_generated/api.js';
-import { holidayFor, isPayrollReady, isScheduledWorkday, localDateTime, shiftInstant, workBreakdown } from '../rules.js';
+import { groupPunches, holidayFor, isPayrollDayReady, isPayrollReady, isScheduledWorkday,
+  localDateTime, shiftInstant, workBreakdown, workBreakdownIntervals } from '../rules.js';
 
 const root = document.getElementById('app');
 const deploymentUrl = import.meta.env.VITE_CONVEX_URL;
@@ -13,6 +14,7 @@ const state = {
   signupAvailable: false, authMode: 'login', signupPhoto: null,
   employees: [], adminData: { punches: [], extensions: [], overtime: [] }, historyRange: null,
   adminRange: null, reportRange: null, selectedEmployee: null, capture: null,
+  backfillDraft: null, backfillLoadId: 0, backfillLoading: false,
   cameraStream: null, sitePromptedDate: null, onsiteAccess: null, installPrompt: null, installDismissed: false, modal: null, auditItems: [],
   message: '', messageType: 'notice'
 };
@@ -87,6 +89,8 @@ async function api(path, options = {}) {
     if (route === '/api/admin/attendance') return options.method === 'POST'
       ? await client.mutation(functions.core.backfill, { token: accessToken, input })
       : await client.query(functions.core.adminAttendance, { token: accessToken, from, to, employeeId: parsed.searchParams.get('employeeId') || undefined });
+    if (route === '/api/admin/attendance/day') return await client.mutation(functions.core.saveAdminAttendanceDay,
+      { token: accessToken, input });
     if (route === '/api/admin/audit') return await client.query(functions.core.auditItems, { token: accessToken });
     if (route === '/api/admin/attendance/day/approve') return await client.mutation(functions.core.approveAttendanceDay,
       { token: accessToken, userId: input.userId, workDate: input.workDate });
@@ -286,6 +290,14 @@ function activeExtension() {
 function premiumBreakdown(date, inPunch, outPunch, extension) {
   return workBreakdown(date, inPunch?.timeUtc, outPunch?.timeUtc, extension?.continuedAt);
 }
+function dayBreakdown(date, punches, extension) {
+  return workBreakdownIntervals(date, groupPunches(punches).map(group => ({
+    inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc
+  })), extension?.continuedAt);
+}
+function intervalText(punches, date, slot) {
+  return groupPunches(punches).map(group => formatShiftTime(group[slot === 'IN' ? 'inPunch' : 'outPunch']?.timeUtc, date)).join(' / ');
+}
 function runningBreakdown(date, inPunch, outPunch, extension) {
   if (outPunch || !extension || !inPunch) return premiumBreakdown(date, inPunch, outPunch, extension);
   const estimate = new Date(Math.min(Date.now(), Date.parse(shiftInstant(date, '06:00', true)))).toISOString();
@@ -342,6 +354,22 @@ function statusOf(inPunch, outPunch) {
   if (inPunch.verification === 'PENDING' || outPunch.verification === 'PENDING') return 'Pending verification';
   return 'Present';
 }
+function statusOfDay(punches) {
+  const groups = groupPunches(punches);
+  if (!groups.length) return 'No record';
+  if (punches.some(punch => punch.verification === 'REJECTED')) return 'Needs correction';
+  if (groups.some(group => !group.inPunch || !group.outPunch)) return 'Incomplete';
+  if (punches.some(punch => punch.verification === 'PENDING')) return 'Pending verification';
+  return 'Present';
+}
+function minutesStatusDay(punches, employee, date) {
+  if (!isScheduledWorkday(date, employee.workdays, config().holidays)) return { late: 0, early: 0 };
+  const groups = groupPunches(punches);
+  if (!groups.length || groups.some(group => !group.inPunch || !group.outPunch)) return { late: 0, early: 0 };
+  const shortfall = dayBreakdown(date, punches, null).undertimeMinutes;
+  const arrivalDelay = Math.max(0, toMinutes(time24(groups[0].inPunch.timeUtc)) - 8 * 60);
+  return { late: arrivalDelay >= 60 ? Math.min(arrivalDelay, shortfall) : 0, early: shortfall };
+}
 function locationText(p) {
   if (!p) return '—';
   if (p.method === 'ADMIN') return 'Created by admin';
@@ -362,13 +390,13 @@ function detectedPunchMethod(location, extension = null) {
 function recentAttendanceFolders(punches) {
   const grouped = new Map();
   for (const punch of punches) {
-    if (!grouped.has(punch.workDate)) grouped.set(punch.workDate, {});
-    grouped.get(punch.workDate)[punch.slot] = punch;
+    if (!grouped.has(punch.workDate)) grouped.set(punch.workDate, []);
+    grouped.get(punch.workDate).push(punch);
   }
   const entries = [...grouped.entries()].sort((a, b) => b[0].localeCompare(a[0]));
-  return `<section class="card attendance-folders-card"><div class="attendance-folders-head"><div><div class="card-title"><span class="symbol">▤</span> RECENT ATTENDANCE</div><p class="card-sub">Your latest Time In and Time Out records.</p></div><button class="link-button" data-nav="history">View all ›</button></div>${entries.length ? `<div class="attendance-folders">${entries.map(([date, pair]) => {
-    const status = statusOf(pair.IN, pair.OUT);
-    return `<article class="attendance-folder"><div class="attendance-folder-tab"><strong>${h(prettyDate(date))}</strong><span class="${pair.OUT ? 'complete' : ''}">${h(status)}</span></div><div class="attendance-folder-times"><div><span>TIME IN</span><strong>${h(formatTime(pair.IN?.timeUtc))}</strong><small>${h(punchSource(pair.IN))}</small>${pair.IN ? mapLink(pair.IN, 'View map ↗') : ''}</div><div><span>TIME OUT</span><strong>${h(formatTime(pair.OUT?.timeUtc))}</strong><small>${h(punchSource(pair.OUT))}</small>${pair.OUT ? mapLink(pair.OUT, 'View map ↗') : ''}</div></div></article>`;
+  return `<section class="card attendance-folders-card"><div class="attendance-folders-head"><div><div class="card-title"><span class="symbol">▤</span> RECENT ATTENDANCE</div><p class="card-sub">Your latest Time In and Time Out records.</p></div><button class="link-button" data-nav="history">View all ›</button></div>${entries.length ? `<div class="attendance-folders">${entries.map(([date, dayPunches]) => {
+    const status = statusOfDay(dayPunches);
+    return `<article class="attendance-folder"><div class="attendance-folder-tab"><strong>${h(prettyDate(date))}</strong><span class="${status === 'Present' ? 'complete' : ''}">${h(status)}</span></div>${groupPunches(dayPunches).map((group, index) => `<div class="attendance-folder-times"><div><span>${index + 1} · TIME IN</span><strong>${h(formatShiftTime(group.inPunch?.timeUtc, date))}</strong><small>${h(punchSource(group.inPunch))}</small>${group.inPunch ? mapLink(group.inPunch, 'View map ↗') : ''}</div><div><span>${index + 1} · TIME OUT</span><strong>${h(formatShiftTime(group.outPunch?.timeUtc, date))}</strong><small>${h(punchSource(group.outPunch))}</small>${group.outPunch ? mapLink(group.outPunch, 'View map ↗') : ''}</div></div>`).join('')}</article>`;
   }).join('')}</div>` : '<div class="holiday-empty"><span aria-hidden="true">◷</span><strong>No attendance yet</strong><p>Your first punch will appear here.</p></div>'}</section>`;
 }
 
@@ -382,8 +410,52 @@ async function loadAdmin(range = state.adminRange || currentRange(), employeeId 
   if (rememberRange) state.adminRange = range;
   state.adminData = await api(rangeUrl('/api/admin/attendance', range, employeeId));
 }
+function blankBackfillDraft() {
+  return { employeeId: '', workDate: today(), reason: '', expectedIds: [], punches: [],
+    segments: [{ timeIn: '', timeOut: '', timeInNextDay: false, timeOutNextDay: false,
+      inId: null, outId: null, offsite: false }] };
+}
+async function loadBackfillDay(employeeId, workDate) {
+  const request = ++state.backfillLoadId;
+  const draft = { ...blankBackfillDraft(), employeeId, workDate };
+  state.backfillDraft = draft;
+  state.backfillLoading = !!(employeeId && workDate);
+  renderView();
+  if (!state.backfillLoading) return;
+  try {
+    const result = await api(rangeUrl('/api/admin/attendance', { start: workDate, end: workDate }, employeeId));
+    if (request !== state.backfillLoadId) return;
+    const punches = result.punches.filter(punch => punch.userId === employeeId && punch.workDate === workDate);
+    draft.punches = punches;
+    draft.expectedIds = punches.map(punch => punch.id);
+    if (punches.length) draft.segments = groupPunches(punches).map(group => {
+      const source = group.outPunch || group.inPunch;
+      return { inId: group.inPunch?.id || null, outId: group.outPunch?.id || null,
+        timeIn: time24(group.inPunch?.timeUtc), timeOut: time24(group.outPunch?.timeUtc),
+        timeInNextDay: !!group.inPunch && localDateTime(group.inPunch.timeUtc, timeZone).date > workDate,
+        timeOutNextDay: !!group.outPunch && localDateTime(group.outPunch.timeUtc, timeZone).date > workDate,
+        offsite: source?.method === 'OFFSITE' || source?.assignmentType === 'OFFSITE' };
+    });
+  } finally {
+    if (request === state.backfillLoadId) { state.backfillDraft = draft; state.backfillLoading = false; renderView(); }
+  }
+}
+function backfillInputFromForm(form) {
+  const draft = state.backfillDraft || blankBackfillDraft();
+  return { employeeId: form.elements.employeeId.value, workDate: form.elements.workDate.value,
+    reason: form.elements.reason.value, expectedIds: draft.expectedIds, punches: draft.punches,
+    segments: [...form.querySelectorAll('.manual-interval')].map((row, index) => ({
+      inId: draft.segments[index]?.inId || null, outId: draft.segments[index]?.outId || null,
+      timeIn: row.querySelector('[name="timeIn"]').value,
+      timeOut: row.querySelector('[name="timeOut"]').value,
+      timeInNextDay: row.querySelector('[name="timeInNextDay"]').checked,
+      timeOutNextDay: row.querySelector('[name="timeOutNextDay"]').checked,
+      offsite: row.querySelector('[name="offsite"]').checked
+    })) };
+}
 async function go(section) {
   stopCamera(); state.section = section; state.modal = null; state.message = '';
+  if (section === 'backfill') { state.backfillLoadId++; state.backfillLoading = false; state.backfillDraft = blankBackfillDraft(); }
   try {
     if (state.session.user.role === 'employee' && ['home', 'history'].includes(section)) await loadEmployee(section === 'home' ? currentRange() : state.historyRange || currentRange());
     if (state.session.user.role === 'admin') {
@@ -427,11 +499,9 @@ function renderEmployeeHome() {
   const holiday = holidayFor(workDate, config().holidays), current = currentRange();
   const days = new Set(punches.filter(p => p.slot === 'IN' && p.verification !== 'REJECTED' &&
     p.workDate >= current.start && p.workDate <= current.end).map(p => p.workDate));
-  const late = punches.filter(p => p.slot === 'IN' && p.workDate >= current.start && p.workDate <= current.end)
-    .reduce((n, p) => n + minutesStatus(p, punches.find(q => q.workDate === p.workDate && q.slot === 'OUT'), user, p.workDate).late, 0);
-  const undertime = punches.filter(p => p.slot === 'OUT' && p.workDate >= current.start && p.workDate <= current.end)
-    .reduce((n, p) => n + premiumBreakdown(p.workDate,
-      punches.find(q => q.workDate === p.workDate && q.slot === 'IN'), p).undertimeMinutes, 0);
+  const cutoffDates = [...new Set(punches.filter(p => p.workDate >= current.start && p.workDate <= current.end).map(p => p.workDate))];
+  const late = cutoffDates.reduce((n, date) => n + minutesStatusDay(punches.filter(p => p.workDate === date), user, date).late, 0);
+  const undertime = cutoffDates.reduce((n, date) => n + minutesStatusDay(punches.filter(p => p.workDate === date), user, date).early, 0);
   const action = holiday ? null : !inPunch ? 'IN' : !outPunch ? 'OUT' : null;
   const clock = toMinutes(time24(new Date().toISOString()));
   const canContinue = action === 'OUT' && !extension && clock >= 17 * 60 && clock < 22 * 60;
@@ -455,18 +525,31 @@ function employeeAttendanceDayCard(date, pair) {
   return `<article class="attendance-day-card"><div class="attendance-day-head"><div><span class="attendance-day-label">WORKDAY</span><h3>${h(prettyDate(date))}</h3></div><span class="attendance-state ${verification}">${h(status)}</span></div><div class="attendance-time-grid"><div><span>TIME IN</span><strong>${h(formatShiftTime(pair.IN?.timeUtc, date))}</strong><small>${h(punchSource(pair.IN))}</small>${pair.IN ? mapLink(pair.IN, 'View map ↗') : ''}</div><div><span>TIME OUT</span><strong>${h(formatShiftTime(pair.OUT?.timeUtc, date))}</strong><small>${h(punchSource(pair.OUT))}</small>${pair.OUT ? mapLink(pair.OUT, 'View map ↗') : ''}</div></div><div class="attendance-hour-grid"><div><span>Regular</span><strong>${h(formatMinutes(hours.regularMinutes))}</strong></div><div><span>Undertime</span><strong>${h(formatMinutes(hours.undertimeMinutes))}</strong></div><div><span>OT</span><strong>${h(formatMinutes(overtime))}</strong></div><div class="differential"><span>Differential</span><strong>${h(formatMinutes(hours.nightCandidateMinutes))}</strong></div></div>${mins.late ? `<div class="attendance-alert">Late balance · ${h(formatMinutes(mins.late))}</div>` : ''}${extension ? `<p class="attendance-review">OT ${h(extension.overtimeDecision.toLowerCase())} · Differential ${h(hours.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}</p>` : ''}${pair.IN?.verification === 'REJECTED' ? `<p class="attendance-rejected">Time In rejected: ${h(pair.IN.rejectionReason)}</p>` : ''}${pair.OUT?.verification === 'REJECTED' ? `<p class="attendance-rejected">Time Out rejected: ${h(pair.OUT.rejectionReason)}</p>` : ''}</article>`;
 }
 
+function employeeAttendanceDayCardSegments(date, punches) {
+  const holiday = holidayFor(date, config().holidays);
+  const status = holiday && !punches.length ? `Holiday · ${holiday.name}` : statusOfDay(punches);
+  const extension = state.employeeData.extensions.find(item => item.workDate === date);
+  const hours = dayBreakdown(date, punches, extension);
+  const overtime = extension && hours.overtimeEligible ? hours.overtimeCandidateMinutes : 0;
+  const mins = minutesStatusDay(punches, state.session.user, date);
+  const verification = punches.some(punch => punch.verification === 'REJECTED') ? 'rejected'
+    : isPayrollDayReady(punches) ? 'approved' : 'pending';
+  const rows = groupPunches(punches).map((group, index) => `<div class="attendance-time-grid"><div><span>${index + 1} · TIME IN</span><strong>${h(formatShiftTime(group.inPunch?.timeUtc, date))}</strong><small>${h(punchSource(group.inPunch))}</small>${group.inPunch ? mapLink(group.inPunch, 'View map ↗') : ''}</div><div><span>${index + 1} · TIME OUT</span><strong>${h(formatShiftTime(group.outPunch?.timeUtc, date))}</strong><small>${h(punchSource(group.outPunch))}</small>${group.outPunch ? mapLink(group.outPunch, 'View map ↗') : ''}</div></div>`).join('');
+  return `<article class="attendance-day-card"><div class="attendance-day-head"><div><span class="attendance-day-label">WORKDAY</span><h3>${h(prettyDate(date))}</h3></div><span class="attendance-state ${verification}">${h(status)}</span></div>${rows}<div class="attendance-hour-grid"><div><span>Regular</span><strong>${h(formatMinutes(hours.regularMinutes))}</strong></div><div><span>Undertime</span><strong>${h(formatMinutes(hours.undertimeMinutes))}</strong></div><div><span>OT</span><strong>${h(formatMinutes(overtime))}</strong></div><div class="differential"><span>Differential</span><strong>${h(formatMinutes(hours.nightCandidateMinutes))}</strong></div></div>${mins.late ? `<div class="attendance-alert">Late balance · ${h(formatMinutes(mins.late))}</div>` : ''}${extension ? `<p class="attendance-review">OT ${h(extension.overtimeDecision.toLowerCase())} · Differential ${h(hours.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}</p>` : ''}${punches.filter(punch => punch.verification === 'REJECTED').map(punch => `<p class="attendance-rejected">Interval ${punch.segment || 1} ${punch.slot === 'IN' ? 'Time In' : 'Time Out'} rejected: ${h(punch.rejectionReason)}</p>`).join('')}</article>`;
+}
+
 function renderHistory() {
   const range = state.historyRange || currentRange();
   const grouped = new Map();
   for (const p of state.employeeData.punches) {
-    if (!grouped.has(p.workDate)) grouped.set(p.workDate, {});
-    grouped.get(p.workDate)[p.slot] = p;
+    if (!grouped.has(p.workDate)) grouped.set(p.workDate, []);
+    grouped.get(p.workDate).push(p);
   }
   for (const holiday of config().holidays) {
-    if (holiday.date >= range.start && holiday.date <= range.end && !grouped.has(holiday.date)) grouped.set(holiday.date, {});
+    if (holiday.date >= range.start && holiday.date <= range.end && !grouped.has(holiday.date)) grouped.set(holiday.date, []);
   }
   const sorted = [...grouped.entries()].sort((a, b) => b[0].localeCompare(a[0]));
-  return `<div class="section-head"><div><p class="eyebrow">MY RECORDS</p><h1 class="section-title">Attendance history</h1><p>Review each workday, recorded locations, regular hours, OT, and Differential.</p></div></div><div class="card attendance-range-card"><div class="section-head"><div><span class="tiny-label">PAYROLL CUTOFF</span><strong>${h(dateSpan(range))}</strong></div><div><button class="btn small secondary" data-action="cutoff-prev" aria-label="Previous cutoff">‹</button> <button class="btn small secondary" data-action="cutoff-next" aria-label="Next cutoff">›</button></div></div><form id="history-form" class="filters"><div class="field"><label>From</label><input type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label>To</label><input type="date" name="to" value="${h(range.end)}" required></div><button class="btn secondary" type="submit">Show records</button></form></div>${sorted.length ? `<div class="attendance-history-grid">${sorted.map(([date, pair]) => employeeAttendanceDayCard(date, pair)).join('')}</div>` : '<div class="empty attendance-history-empty">No attendance records in this date range.</div>'}`;
+  return `<div class="section-head"><div><p class="eyebrow">MY RECORDS</p><h1 class="section-title">Attendance history</h1><p>Review each workday, recorded locations, regular hours, OT, and Differential.</p></div></div><div class="card attendance-range-card"><div class="section-head"><div><span class="tiny-label">PAYROLL CUTOFF</span><strong>${h(dateSpan(range))}</strong></div><div><button class="btn small secondary" data-action="cutoff-prev" aria-label="Previous cutoff">‹</button> <button class="btn small secondary" data-action="cutoff-next" aria-label="Next cutoff">›</button></div></div><form id="history-form" class="filters"><div class="field"><label>From</label><input type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label>To</label><input type="date" name="to" value="${h(range.end)}" required></div><button class="btn secondary" type="submit">Show records</button></form></div>${sorted.length ? `<div class="attendance-history-grid">${sorted.map(([date, punches]) => employeeAttendanceDayCardSegments(date, punches)).join('')}</div>` : '<div class="empty attendance-history-empty">No attendance records in this date range.</div>'}`;
 }
 
 function renderCapture() {
@@ -523,12 +606,13 @@ function renderAdminHome() {
   const present = new Set(todayRows.filter(p => p.slot === 'IN').map(p => p.userId)).size;
   const pendingPremium = (state.adminData.extensions || []).filter(extension => {
     const pair = rows.filter(p => p.userId === extension.userId && p.workDate === extension.workDate);
-    const hours = premiumBreakdown(extension.workDate, pair.find(p => p.slot === 'IN'), pair.find(p => p.slot === 'OUT'), extension);
+    const hours = dayBreakdown(extension.workDate, pair, extension);
     return hours.overtimeEligible && (extension.overtimeDecision === 'PENDING' ||
       hours.nightCandidateMinutes > 0 && extension.nightDecision === 'PENDING');
   }).length;
   const pending = rows.filter(p => p.verification === 'PENDING').length + pendingPremium;
-  const incomplete = new Set(todayRows.filter(p => p.slot === 'IN' && !todayRows.some(q => q.userId === p.userId && q.slot === 'OUT')).map(p => p.userId)).size;
+  const incomplete = new Set(todayRows.filter(p => groupPunches(todayRows.filter(q => q.userId === p.userId))
+    .some(group => !group.inPunch || !group.outPunch)).map(p => p.userId)).size;
   const recent = recentEmployeeFolders(rows);
   return `<div class="hero"><p class="eyebrow">ADMIN DASHBOARD · ${h(prettyDate(today()))}</p><h1>Attendance overview</h1><p>Review field proofs and resolve missing records before payroll cutoff.</p></div><div class="mini-grid"><div class="stat-card"><div class="num">${employees.filter(e => e.active).length}</div><div class="label">Active employees</div></div><div class="stat-card"><div class="num">${present}</div><div class="label">Timed in today</div></div><div class="stat-card"><div class="num">${pending}</div><div class="label">Pending reviews</div></div><div class="stat-card"><div class="num">${incomplete}</div><div class="label">Incomplete today</div></div></div><div style="height:17px"></div><div class="grid"><div class="card wide"><div class="card-title"><span class="symbol">▥</span> CURRENT CUTOFF</div><strong>${h(dateSpan(currentRange()))}</strong><p class="card-sub">Review exceptions and prepare printable payroll summary.</p><button class="link-button" data-nav="report">Open report ›</button></div></div><div style="height:17px"></div><div class="grid">${renderHolidayCard()}</div><div style="height:23px"></div><div class="section-head"><div><h2 class="section-title">Recent punches</h2><p>Click an employee folder to view the latest proof.</p></div><button class="btn small secondary" data-nav="records">See all</button></div>${recent.length ? `<div class="punch-folders">${recent.map(recentPunchFolder).join('')}</div>` : '<div class="empty">No attendance punches in this cutoff yet.</div>'}`;
 }
@@ -545,7 +629,8 @@ function recentEmployeeFolders(punches, limit = 8) {
   }
   return [...employees.values()].sort((a, b) => b.latest.timeUtc.localeCompare(a.latest.timeUtc)).slice(0, limit).map(item => {
     const dayPunches = punches.filter(p => p.userId === item.latest.userId && p.workDate === item.latest.workDate);
-    return { ...item, inPunch: dayPunches.find(p => p.slot === 'IN'), outPunch: dayPunches.find(p => p.slot === 'OUT') };
+    const latestInterval = groupPunches(dayPunches).at(-1);
+    return { ...item, inPunch: latestInterval?.inPunch, outPunch: latestInterval?.outPunch };
   });
 }
 function recentPunchFolder({ latest, inPunch, outPunch }) {
@@ -560,12 +645,12 @@ function dailyRecordItems(punches) {
     days.get(key).punches.push(punch);
   }
   return [...days.values()].map(day => {
-    const inPunch = day.punches.find(p => p.slot === 'IN'), outPunch = day.punches.find(p => p.slot === 'OUT');
-    const payrollReady = isPayrollReady(inPunch, outPunch);
-    const rejected = [inPunch, outPunch].some(p => p?.verification === 'REJECTED');
-    const status = payrollReady ? 'APPROVED FOR PAYROLL' : rejected ? 'NEEDS CORRECTION' : inPunch && outPunch ? 'READY FOR REVIEW' : 'INCOMPLETE';
-    const id = inPunch?.id || outPunch?.id;
-    return `<button type="button" class="list-item record-item-button" data-action="record-detail" data-id="${h(id)}" aria-label="Review daily attendance for ${h(day.employeeName)} on ${h(prettyDate(day.workDate))}"><div><strong>${h(day.employeeName)}</strong><p>${h(prettyDate(day.workDate))} · In ${h(formatShiftTime(inPunch?.timeUtc, day.workDate))} · Out ${h(formatShiftTime(outPunch?.timeUtc, day.workDate))}</p></div><div class="right"><span class="record-action ${payrollReady ? 'out' : 'in'}">${status}</span></div></button>`;
+    const payrollReady = isPayrollDayReady(day.punches);
+    const rejected = day.punches.some(p => p.verification === 'REJECTED');
+    const complete = groupPunches(day.punches).every(group => group.inPunch && group.outPunch);
+    const status = payrollReady ? 'APPROVED FOR PAYROLL' : rejected ? 'NEEDS CORRECTION' : complete ? 'READY FOR REVIEW' : 'INCOMPLETE';
+    const id = day.punches[0]?.id;
+    return `<button type="button" class="list-item record-item-button" data-action="record-detail" data-id="${h(id)}" aria-label="Review daily attendance for ${h(day.employeeName)} on ${h(prettyDate(day.workDate))}"><div><strong>${h(day.employeeName)}</strong><p>${h(prettyDate(day.workDate))} · ${groupPunches(day.punches).length} interval(s) · In ${h(intervalText(day.punches, day.workDate, 'IN'))} · Out ${h(intervalText(day.punches, day.workDate, 'OUT'))}</p></div><div class="right"><span class="record-action ${payrollReady ? 'out' : 'in'}">${status}</span></div></button>`;
   }).join('');
 }
 function punchProofRow(p, slot) {
@@ -582,12 +667,12 @@ function punchProofRow(p, slot) {
 function renderPremiumQueue() {
   const extensions = state.adminData.extensions || [];
   return `<section class="card premium-queue"><div class="card-title"><span class="symbol">◷</span> OVERTIME & DIFFERENTIAL REVIEW</div><p class="card-sub">Review offsite proof first. Overtime begins after 5:00 PM only when 8 regular hours are complete and needs at least 1 full hour. Work between 10:00 PM and 6:00 AM is tracked separately as Differential.</p>${extensions.length ? `<div class="list">${extensions.map(extension => {
-    const pair = state.adminData.punches.filter(p => p.userId === extension.userId && p.workDate === extension.workDate);
-    const inPunch = pair.find(p => p.slot === 'IN'), outPunch = pair.find(p => p.slot === 'OUT');
-    const hours = runningBreakdown(extension.workDate, inPunch, outPunch, extension);
-    const proofReady = inPunch?.verification === 'APPROVED' && outPunch?.verification === 'APPROVED' &&
-      (outPunch.method !== 'ADMIN' || outPunch.assignmentType === 'OFFSITE');
-    return `<div class="list-item premium-item"><div><strong>${h(extension.employeeName)} · ${h(prettyDate(extension.workDate))}</strong><p>${h(extension.source === 'ADMIN' ? 'Admin-entered offsite' : 'Employee offsite')} · In ${h(formatTime(inPunch?.timeUtc))} · Out ${h(formatShiftTime(outPunch?.timeUtc, extension.workDate))}</p><p>OT ${h(formatMinutes(hours.overtimeCandidateMinutes))} · ${h(!outPunch ? 'In progress' : hours.overtimeEligible ? extension.overtimeDecision.toLowerCase() : 'below 1 hour; regular only')} · Differential ${h(formatMinutes(hours.nightCandidateMinutes))} · ${h(hours.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}</p>${outPunch && !proofReady ? '<p class="tiny-label">Approved Time In and Time Out proof is required before granting.</p>' : ''}${extension.overtimeReason ? `<p class="tiny-label">OT reason: ${h(extension.overtimeReason)}</p>` : ''}${extension.nightReason ? `<p class="tiny-label">Differential reason: ${h(extension.nightReason)}</p>` : ''}</div><div class="premium-actions">${outPunch && hours.overtimeEligible ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Grant OT</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="REJECTED">Deny OT</button>` : ''}${outPunch && hours.nightCandidateMinutes && extension.overtimeDecision === 'APPROVED' ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Grant Differential</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="REJECTED">Deny Differential</button>` : ''}</div></div>`;
+    const punches = state.adminData.punches.filter(p => p.userId === extension.userId && p.workDate === extension.workDate);
+    const complete = groupPunches(punches).length && groupPunches(punches).every(group => group.inPunch && group.outPunch);
+    const hours = dayBreakdown(extension.workDate, punches, extension);
+    const proofReady = isPayrollDayReady(punches) && (extension.source !== 'ADMIN' || punches.some(p =>
+      p.slot === 'OUT' && p.method === 'ADMIN' && p.assignmentType === 'OFFSITE' && p.timeUtc > shiftInstant(extension.workDate, '17:00')));
+    return `<div class="list-item premium-item"><div><strong>${h(extension.employeeName)} · ${h(prettyDate(extension.workDate))}</strong><p>${h(extension.source === 'ADMIN' ? 'Admin-entered offsite' : 'Employee offsite')} · In ${h(intervalText(punches, extension.workDate, 'IN'))} · Out ${h(intervalText(punches, extension.workDate, 'OUT'))}</p><p>OT ${h(formatMinutes(hours.overtimeCandidateMinutes))} · ${h(!complete ? 'In progress' : hours.overtimeEligible ? extension.overtimeDecision.toLowerCase() : 'below 1 hour; regular only')} · Differential ${h(formatMinutes(hours.nightCandidateMinutes))} · ${h(hours.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}</p>${complete && !proofReady ? '<p class="tiny-label">Approved Time In and Time Out proof is required before granting.</p>' : ''}${extension.overtimeReason ? `<p class="tiny-label">OT reason: ${h(extension.overtimeReason)}</p>` : ''}${extension.nightReason ? `<p class="tiny-label">Differential reason: ${h(extension.nightReason)}</p>` : ''}</div><div class="premium-actions">${complete && hours.overtimeEligible ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Grant OT</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="REJECTED">Deny OT</button>` : ''}${complete && hours.nightCandidateMinutes && extension.overtimeDecision === 'APPROVED' ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Grant Differential</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="REJECTED">Deny Differential</button>` : ''}</div></div>`;
   }).join('')}</div>` : '<div class="empty">No offsite overtime requests in this range.</div>'}</section>`;
 }
 function renderRecords() {
@@ -619,7 +704,16 @@ function renderSettings() {
       </div><div class="grid settings-extra">${renderHolidayCard(8)}</div>`;
 }
 function renderBackfill() {
-  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Add attendance</h1><p>For no-signal field work or a documented correction.</p></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">＋</span> ADMIN-CREATED RECORD</div><form id="backfill-form"><div class="field"><label>Employee</label><select name="employeeId" required><option value="">Select employee</option>${state.employees.map(e => `<option value="${e.id}">${h(e.name)}</option>`).join('')}</select></div><div class="field"><label>Work date</label><input name="workDate" type="date" value="${h(today())}" required></div><div class="field-row"><div class="field"><label>Time In (optional)</label><input name="timeIn" type="time"></div><div class="field"><label>Time Out (optional)</label><input name="timeOut" type="time"></div></div><label class="check-row"><input name="timeOutNextDay" type="checkbox"> Time Out is after midnight (next day, no later than 6:00 AM)</label><label class="check-row"><input name="offsite" type="checkbox"> Offsite / field assignment — calculate overtime and Differential for review</label><div class="field"><label>Reason / field assignment</label><textarea name="reason" minlength="5" maxlength="300" required placeholder="e.g. No mobile signal at client site"></textarea></div><label class="check-row replace-check"><input name="replaceExisting" type="checkbox"> Overwrite matching Time In / Time Out already saved on this workday</label><p class="tiny-label">The old punch remains in the audit history, but the corrected punch becomes the active payroll record.</p><button class="btn block" type="submit">Save admin-created attendance</button></form></div><div class="card"><div class="card-title"><span class="symbol">ⓘ</span> HOW HOURS ARE COUNTED</div><p class="card-sub">Regular time starts at 8:00 AM and is capped at 8 hours, including 12:00–1:00 PM. Missing hours can be recovered after 5:00 PM before overtime begins.</p><p class="card-sub">Hours from 10:00 PM–6:00 AM are Differential and never count as regular time. A selfie or GPS is not required for admin-created attendance. Corrections reset premium approvals.</p><button class="link-button" data-nav="records">Review extra hours ›</button></div></div>`;
+  const draft = state.backfillDraft || blankBackfillDraft();
+  const segments = draft.segments.map((segment, index) => {
+    const saved = groupPunches(draft.punches)[index];
+    return `<section class="manual-interval" data-index="${index}">
+    <div class="manual-interval-head"><strong>${index === 0 ? 'First work interval' : `Return to work · interval ${index + 1}`}</strong>${index > 0 && !segment.inId && !segment.outId ? `<button class="link-button" type="button" data-action="remove-manual-interval" data-index="${index}">Remove</button>` : ''}</div>
+    <div class="field-row"><div class="field"><label>Time In</label><input name="timeIn" type="time" value="${h(segment.timeIn)}" required></div><div class="field"><label>Time Out ${index === 0 ? '(optional until shift ends)' : ''}</label><input name="timeOut" type="time" value="${h(segment.timeOut)}" ${index > 0 ? 'required' : ''}></div></div>
+    <div class="manual-options">${index > 0 ? `<label class="check-row"><input name="timeInNextDay" type="checkbox" ${segment.timeInNextDay ? 'checked' : ''}> Time In after midnight</label>` : '<input name="timeInNextDay" type="checkbox" hidden>'}<label class="check-row"><input name="timeOutNextDay" type="checkbox" ${segment.timeOutNextDay ? 'checked' : ''}> Time Out after midnight (by 6:00 AM)</label><label class="check-row"><input name="offsite" type="checkbox" ${segment.offsite ? 'checked' : ''}> Offsite / field work</label></div>
+    ${saved ? `<div class="manual-saved-proof">${[saved.inPunch, saved.outPunch].filter(Boolean).map(punch => `<span>${punch.slot === 'IN' ? 'In' : 'Out'}: ${h(punchSource(punch))} · ${h(punch.verification.toLowerCase())}${punch.hasSelfie ? ' · selfie' : ''}${mapLink(punch, 'Map ↗')}</span>`).join('')}</div><p class="tiny-label">Unchanged times keep the original selfie, GPS, and approval. Edited times become audited admin corrections.</p>` : ''}</section>`;
+  }).join('');
+  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Add attendance</h1><p>Select an employee and work date to load existing punches, edit the times, or add a return-to-work interval.</p></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">＋</span> ADMIN ATTENDANCE EDITOR</div><form id="backfill-form"><div class="field"><label>Employee</label><select name="employeeId" required><option value="">Select employee</option>${state.employees.map(e => `<option value="${e.id}" ${e.id === draft.employeeId ? 'selected' : ''}>${h(e.name)}</option>`).join('')}</select></div><div class="field"><label>Work date</label><input name="workDate" type="date" value="${h(draft.workDate)}" required></div>${state.backfillLoading ? '<div class="notice">Loading saved punches…</div>' : draft.employeeId ? `<div class="notice ${draft.expectedIds.length ? 'success' : ''}">${draft.expectedIds.length ? `${draft.expectedIds.length} existing punch${draft.expectedIds.length === 1 ? '' : 'es'} loaded for this day. Edit only the time that needs correction.` : 'No punches saved for this day yet.'}</div>` : '<p class="tiny-label">Choose an employee to check this day’s current attendance.</p>'}<div class="manual-interval-list">${segments}</div><button class="btn secondary small" type="button" data-action="add-manual-interval" ${state.backfillLoading ? 'disabled' : ''}>＋ Add another Time In / Time Out</button><div class="field settings-extra"><label>Reason / field assignment</label><textarea name="reason" minlength="5" maxlength="300" required placeholder="e.g. Returned to client site for urgent task">${h(draft.reason)}</textarea></div><p class="tiny-label">New or edited punches are marked Created by admin. Existing punches with unchanged times keep their proof. Extra hours still require admin review.</p><button class="btn block" type="submit" ${state.backfillLoading ? 'disabled' : ''}>Review attendance changes</button></form></div><div class="card"><div class="card-title"><span class="symbol">ⓘ</span> HOW HOURS ARE COUNTED</div><p class="card-sub">Regular time starts at 8:00 AM and is capped at 8 hours, including 12:00–1:00 PM. Only time inside saved work intervals counts; gaps between Time Out and the next Time In do not.</p><p class="card-sub">Offsite work after 5:00 PM is considered for overtime once eight regular hours and a full hour of overtime are recorded. Work from 10:00 PM–6:00 AM is also shown as Differential. Admin reviews each premium stage.</p><button class="link-button" data-nav="records">Review extra hours ›</button></div></div>`;
 }
 function reportRows() {
   const range = state.reportRange || currentRange();
@@ -632,25 +726,27 @@ function reportRows() {
       regular: 0, overtime: 0, night: 0, pending: 0 };
     for (let date = range.start; date <= range.end; date = tomorrow(date)) {
       const pair = punches.filter(p => p.userId === employee.id && p.workDate === date);
-      const inPunch = pair.find(p => p.slot === 'IN'), outPunch = pair.find(p => p.slot === 'OUT');
+      const segments = groupPunches(pair);
+      const inPunch = segments[0]?.inPunch, outPunch = segments.at(-1)?.outPunch;
+      const complete = segments.length && segments.every(group => group.inPunch && group.outPunch);
       const extension = extensionMap.get(`${employee.id}|${date}`);
       const holiday = holidayFor(date, config().holidays);
       const scheduled = isScheduledWorkday(date, employee.workdays, config().holidays);
       if (!scheduled && !holiday && !pair.length && !extension && !otMap.has(`${employee.id}|${date}`)) continue;
-      let status = statusOf(inPunch, outPunch);
+      let status = statusOfDay(pair);
       if (holiday) status = pair.length ? `${status} (holiday: ${holiday.name})` : `Holiday · ${holiday.name}`;
       else if (status === 'No record' && date > today()) status = 'Upcoming';
       else if (status === 'No record' && date === today()) status = 'Today · not recorded';
       else if (!scheduled) status = `${status} (off day)`;
-      const hours = premiumBreakdown(date, inPunch, outPunch, extension);
-      const payrollReady = isPayrollReady(inPunch, outPunch);
+      const hours = dayBreakdown(date, pair, extension);
+      const payrollReady = isPayrollDayReady(pair);
       const legacyOvertime = payrollReady && !extension ? (otMap.get(`${employee.id}|${date}`) || 0) : 0;
       const overtime = (payrollReady && hours.overtimeEligible && extension?.overtimeDecision === 'APPROVED'
         ? hours.overtimeCandidateMinutes : 0) + legacyOvertime;
       const night = payrollReady && hours.nightCandidateMinutes && (!extension ||
         extension.overtimeDecision === 'APPROVED' && extension.nightDecision === 'APPROVED')
         ? hours.nightCandidateMinutes : 0;
-      const overtimeStatus = !extension ? (legacyOvertime ? 'Admin granted' : 'No request') : !outPunch
+      const overtimeStatus = !extension ? (legacyOvertime ? 'Admin granted' : 'No request') : !complete
         ? 'In progress' : hours.overtimeEligible ? extension.overtimeDecision : 'Below 1h · regular only';
       const nightStatus = hours.nightCandidateMinutes ? (extension?.nightDecision || 'Included with attendance') : '—';
       if (status === 'No record' && scheduled) totals.noRecord++;
@@ -659,7 +755,7 @@ function reportRows() {
           overtimeStatus === 'PENDING' || nightStatus === 'PENDING') totals.pending++;
       totals.undertime += scheduled && payrollReady ? hours.undertimeMinutes : 0;
       totals.regular += payrollReady ? hours.regularMinutes : 0; totals.overtime += overtime; totals.night += night;
-      rows.push({ date, inPunch, outPunch, undertime: scheduled && payrollReady ? hours.undertimeMinutes : 0,
+      rows.push({ date, inPunch, outPunch, punches: pair, undertime: scheduled && payrollReady ? hours.undertimeMinutes : 0,
         regular: payrollReady ? hours.regularMinutes : 0, overtime, night });
     }
     return { employee, rows, totals };
@@ -672,9 +768,9 @@ function renderReportHeader(range, generated, className = '') {
 }
 function renderReportEmployee({ employee, rows, totals }, range, generated) {
   const body = rows.map(row => `<tr><td data-label="Date">${h(numericDate(row.date))}</td>
-    <td data-label="Time In">${h(formatShiftTime(row.inPunch?.timeUtc, row.date))}</td>
-    <td data-label="Time Out">${h(formatShiftTime(row.outPunch?.timeUtc, row.date))}</td>
-    <td data-label="Source">${h(punchSource(row.inPunch))} / ${h(punchSource(row.outPunch))}</td>
+    <td data-label="Time In">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatShiftTime(group.inPunch?.timeUtc, row.date))}</div>`).join('') || '—'}</td>
+    <td data-label="Time Out">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatShiftTime(group.outPunch?.timeUtc, row.date))}</div>`).join('') || '—'}</td>
+    <td data-label="Source">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(punchSource(group.inPunch))} / ${h(punchSource(group.outPunch))}</div>`).join('') || '—'}</td>
     <td data-label="Regular">${h(formatMinutes(row.regular))}</td><td data-label="Undertime">${h(formatMinutes(row.undertime))}</td>
     <td data-label="OT">${h(formatMinutes(row.overtime))}</td><td data-label="Differential">${h(formatMinutes(row.night))}</td></tr>`).join('');
   return `<section class="report-employee">${renderReportHeader(range, generated, 'employee-report-header')}<div class="report-employee-head"><div><span>EMPLOYEE</span><h3>${h(employee.name)}</h3></div><div class="report-total"><span>Approved regular</span><strong>${h(formatMinutes(totals.regular))}</strong></div></div>
@@ -786,18 +882,19 @@ function showModal(modal) {
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="employee-confirm-title"><div class="modal-head"><div><p class="modal-kicker">REVIEW ACTION</p><h2 id="employee-confirm-title">Review employee account</h2></div><button class="close" data-action="modal-close" aria-label="Close employee review">×</button></div><p>Check these details before ${editing ? 'updating' : 'creating'} the account.</p><div class="review-list"><div class="review-row"><span>Action</span><strong>${editing ? 'Update employee' : 'Create employee'}</strong></div><div class="review-row"><span>Name</span><strong>${h(input.name)}</strong></div><div class="review-row"><span>Mobile login</span><strong>${h(input.mobile)}</strong></div><div class="review-row"><span>Workdays</span><strong>${h(workdayLabel(input.workdays))}</strong></div>${editing ? `<div class="review-row"><span>Account</span><strong>${input.active ? 'Active' : 'Disabled'}</strong></div>` : ''}<div class="review-row"><span>Password</span><strong>${input.password ? (editing ? 'Will be changed' : 'Temporary password is set') : 'Keep current password'}</strong></div></div><div class="notice warn">Confirm only after reviewing the employee login and schedule.</div><form id="employee-confirm-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm &amp; ${editing ? 'Save' : 'Create'}</button></div></form></div></div>`;
   } else if (modal.kind === 'attendance-confirm') {
     const { input, employeeName } = modal;
-    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="attendance-confirm-title"><div class="modal-head"><div><p class="modal-kicker">REVIEW ACTION</p><h2 id="attendance-confirm-title">Review manual attendance</h2></div><button class="close" data-action="modal-close" aria-label="Close attendance review">×</button></div><p>Verify the attendance details before saving this record.</p><div class="review-list"><div class="review-row"><span>Employee</span><strong>${h(employeeName)}</strong></div><div class="review-row"><span>Work date</span><strong>${h(numericDate(input.workDate))}</strong></div><div class="review-row"><span>Time In</span><strong>${h(input.timeIn || 'Not provided')}</strong></div><div class="review-row"><span>Time Out</span><strong>${h(input.timeOut ? `${input.timeOut}${input.timeOutNextDay ? ' · next day' : ''}` : 'Not provided')}</strong></div><div class="review-row"><span>Assignment</span><strong>${input.offsite ? 'Offsite / field' : 'Onsite'}</strong></div><div class="review-row"><span>Replace existing</span><strong>${input.replaceExisting ? 'Yes' : 'No'}</strong></div><div class="review-row"><span>Reason</span><strong>${h(input.reason)}</strong></div></div><div class="notice ${input.replaceExisting ? 'warn' : ''}">${input.replaceExisting ? 'Matching punches on this workday will be overwritten. The previous entries remain in the audit history.' : 'This manual attendance will be added to the employee record.'}</div><form id="attendance-confirm-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm &amp; Save</button></div></form></div></div>`;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="attendance-confirm-title"><div class="modal-head"><div><p class="modal-kicker">REVIEW ACTION</p><h2 id="attendance-confirm-title">Review attendance changes</h2></div><button class="close" data-action="modal-close" aria-label="Close attendance review">×</button></div><p>Verify the intervals before saving this workday.</p><div class="review-list"><div class="review-row"><span>Employee</span><strong>${h(employeeName)}</strong></div><div class="review-row"><span>Work date</span><strong>${h(numericDate(input.workDate))}</strong></div>${input.segments.map((segment, index) => `<div class="review-row"><span>Interval ${index + 1}</span><strong>${h(segment.timeIn)}${segment.timeInNextDay ? ' (+1 day)' : ''} → ${h(segment.timeOut || 'Open')}${segment.timeOutNextDay ? ' (+1 day)' : ''} · ${segment.offsite ? 'Offsite' : 'Onsite'}</strong></div>`).join('')}<div class="review-row"><span>Reason</span><strong>${h(input.reason)}</strong></div></div><div class="notice warn">Edited punches replace the active time and keep the original in the audit trail. Unchanged punches keep their selfie, GPS, and verification.</div><form id="attendance-confirm-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm &amp; Save</button></div></form></div></div>`;
   } else if (modal.kind === 'arrival') {
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-label="Onsite arrival"><div class="modal-head"><h2>You're at ${h(config().siteName)} 👋</h2><button class="close" data-action="modal-close" aria-label="Close">×</button></div><p>Your onsite Time In is not recorded yet. Take a selfie and confirm to save your attendance.</p><div class="map-card">Within site radius · GPS accuracy ±${Math.round(modal.location.accuracyM)} m</div><div class="card-actions"><button class="btn" data-action="arrival-time-in">Open Time In</button><button class="btn secondary" data-action="modal-close">Later</button></div></div></div>`;
   } else if (modal.kind === 'record-day') {
-    const inPunch = modal.punches.find(p => p.slot === 'IN'), outPunch = modal.punches.find(p => p.slot === 'OUT');
-    const payrollReady = isPayrollReady(inPunch, outPunch);
+    const segments = groupPunches(modal.punches);
+    const payrollReady = isPayrollDayReady(modal.punches);
+    const complete = segments.length && segments.every(group => group.inPunch && group.outPunch);
     const reviewAction = payrollReady
       ? '<div class="notice success proof-payroll-status"><strong>Daily attendance approved.</strong> This day is included in payroll.</div>'
-      : inPunch && outPunch
-        ? `<div class="proof-approve"><p>Review both punch times, GPS locations, and photos before approval.</p><button class="btn" data-action="approve-attendance-day" data-user-id="${h(inPunch.userId)}" data-work-date="${h(modal.workDate)}">Approve Daily Attendance</button></div>`
-        : '<div class="notice warn proof-payroll-status">Time In and Time Out must both be recorded before this day can be approved for payroll.</div>';
-    holder.innerHTML = `<div class="modal-backdrop"><div class="modal proof-modal" role="dialog" aria-modal="true" aria-labelledby="proof-day-title"><div class="modal-head"><div><p class="modal-kicker">DAILY ATTENDANCE REVIEW</p><h2 id="proof-day-title">${h(modal.employeeName)}</h2><p>${h(prettyDate(modal.workDate))}</p></div><button class="close" data-action="modal-close" aria-label="Close daily proof">×</button></div><div class="proof-rows">${punchProofRow(inPunch, 'IN')}${punchProofRow(outPunch, 'OUT')}</div>${reviewAction}</div></div>`;
+      : complete
+        ? `<div class="proof-approve"><p>Review every punch time, GPS location, and photo before approval.</p><button class="btn" data-action="approve-attendance-day" data-user-id="${h(modal.punches[0].userId)}" data-work-date="${h(modal.workDate)}">Approve Daily Attendance</button></div>`
+        : '<div class="notice warn proof-payroll-status">Time In and Time Out must be recorded for every interval before this day can be approved for payroll.</div>';
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal proof-modal" role="dialog" aria-modal="true" aria-labelledby="proof-day-title"><div class="modal-head"><div><p class="modal-kicker">DAILY ATTENDANCE REVIEW</p><h2 id="proof-day-title">${h(modal.employeeName)}</h2><p>${h(prettyDate(modal.workDate))}</p></div><button class="close" data-action="modal-close" aria-label="Close daily proof">×</button></div><div class="proof-rows">${segments.map((group, index) => `<h3 class="proof-interval-title">Work interval ${index + 1}</h3>${punchProofRow(group.inPunch, 'IN')}${punchProofRow(group.outPunch, 'OUT')}`).join('')}</div>${reviewAction}<button class="btn secondary small" data-action="edit-record-day" data-user-id="${h(modal.punches[0]?.userId)}" data-work-date="${h(modal.workDate)}">Edit or add interval</button></div></div>`;
   } else if (modal.kind === 'approve-day') {
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="approve-day-title"><div class="modal-head"><div><p class="modal-kicker">CONFIRM ATTENDANCE</p><h2 id="approve-day-title">Approve daily attendance?</h2></div><button class="close" data-action="modal-close" aria-label="Close attendance approval">×</button></div><p><strong>${h(modal.employeeName)}</strong> · ${h(prettyDate(modal.workDate))}</p><div class="notice">This approves both Time In and Time Out. The approved workday will be included in payroll.</div><form id="approve-day-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm Approval</button></div></form></div></div>`;
   } else if (modal.kind === 'premium') {
@@ -979,6 +1076,27 @@ document.addEventListener('click', async event => {
       state.historyRange = cutoffFor(action === 'cutoff-prev' ? yesterday(range.start) : tomorrow(range.end));
       await loadEmployee(state.historyRange); return renderView();
     }
+    if (action === 'add-manual-interval') {
+      const form = document.getElementById('backfill-form');
+      if (!form?.elements.employeeId.value) throw new Error('Choose an employee first.');
+      const input = backfillInputFromForm(form);
+      if (input.segments.length >= 6) throw new Error('A maximum of six intervals can be saved for one workday.');
+      if (!input.segments.at(-1).timeOut) throw new Error('Finish the previous Time Out before adding another interval.');
+      state.backfillDraft = { ...input, segments: [...input.segments, { timeIn: '', timeOut: '',
+        timeInNextDay: false, timeOutNextDay: false, inId: null, outId: null,
+        offsite: input.segments.at(-1).offsite }] };
+      return renderView();
+    }
+    if (action === 'remove-manual-interval') {
+      const form = document.getElementById('backfill-form');
+      const input = backfillInputFromForm(form), index = Number(node.dataset.index);
+      if (index < 1 || input.segments[index]?.inId || input.segments[index]?.outId) throw new Error('Only a new unsaved interval can be removed.');
+      input.segments.splice(index, 1); state.backfillDraft = input; return renderView();
+    }
+    if (action === 'edit-record-day') {
+      const employeeId = node.dataset.userId, workDate = node.dataset.workDate;
+      closeModal(); await go('backfill'); await loadBackfillDay(employeeId, workDate); return;
+    }
     if (action === 'employee-new') { state.selectedEmployee = null; return renderView(); }
     if (action === 'employee-edit') { state.selectedEmployee = state.employees.find(e => e.id === node.dataset.id); return renderView(); }
     if (action === 'employee-delete') {
@@ -1061,6 +1179,10 @@ document.addEventListener('click', async event => {
 
 document.addEventListener('change', async event => {
   try {
+    if (event.target.closest('#backfill-form') && ['employeeId', 'workDate'].includes(event.target.name)) {
+      const form = event.target.form;
+      return await loadBackfillDay(form.elements.employeeId.value, form.elements.workDate.value);
+    }
     if (event.target.id === 'payroll-month') return syncPayrollEditor(true);
     if (event.target.id === 'cutoff-first-start' || event.target.id === 'cutoff-second-start') return syncPayrollEditor();
     if (event.target.id === 'selfie-file') return await fileSelfie(event.target.files[0]);
@@ -1194,9 +1316,7 @@ document.addEventListener('submit', async event => {
       closeModal(); state.selectedEmployee = null; await loadEmployees(); renderView(); return flash(editing ? 'Employee updated successfully.' : 'Employee account created successfully.', 'success');
     }
     if (id === 'backfill-form') {
-      const input = { employeeId: values.employeeId, workDate: values.workDate, timeIn: values.timeIn || null, timeOut: values.timeOut || null,
-        timeOutNextDay: !!values.timeOutNextDay, offsite: !!values.offsite,
-        reason: values.reason, replaceExisting: !!values.replaceExisting };
+      const { punches: _loadedPunches, ...input } = backfillInputFromForm(form);
       const employeeName = state.employees.find(employee => employee.id === input.employeeId)?.name || 'Selected employee';
       showModal({ kind: 'attendance-confirm', input, employeeName }); return;
     }
@@ -1204,11 +1324,9 @@ document.addEventListener('submit', async event => {
       const pending = state.modal;
       if (pending?.kind !== 'attendance-confirm') throw new Error('Attendance review expired. Please review the form again.');
       const { input } = pending;
-      const result = await api('/api/admin/attendance', { method: 'POST', body: JSON.stringify(input) });
-      closeModal(); state.adminRange = { start: input.workDate, end: input.workDate };
-      await go('records'); return flash(result.replaced
-        ? `${result.replaced} existing same-day ${result.replaced === 1 ? 'punch was' : 'punches were'} replaced. The correction is now active.`
-        : 'Admin-created attendance saved. Review any extra hours below.', 'success');
+      const result = await api('/api/admin/attendance/day', { method: 'POST', body: JSON.stringify(input) });
+      closeModal(); state.backfillDraft = null; state.adminRange = { start: input.workDate, end: input.workDate };
+      await go('records'); return flash(`${result.created} punch${result.created === 1 ? '' : 'es'} saved${result.replaced ? `, including ${result.replaced} audited correction${result.replaced === 1 ? '' : 's'}` : ''}. Review extra hours and daily approval below.`, 'success');
     }
   } catch (error) { flash(error.message, 'error'); }
   finally { if (submit?.isConnected) submit.disabled = false; }
