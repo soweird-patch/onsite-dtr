@@ -764,7 +764,7 @@ function reportRows() {
 function renderReportHeader(range, generated, className = '') {
   return `<div class="${className}"><div class="report-head"><div class="report-brand"><img src="${h(state.branding.logo512Url || '/aoda-report-logo.jpg')}" alt="Philippine AODA Power Corp. logo"><div class="report-company"><h2>PHILIPPINE AODA POWER CORP.</h2><p>PCCCII BLDG., MOONSTONE AVE., GRAND CENTENNIAL HOMES,<br>KAWIT 4104, CAVITE, PHILIPPINES</p></div></div></div>
     <div class="report-meta"><div><strong>EMPLOYEE ATTENDANCE SUMMARY</strong><p>${h(state.branding.appName)} · Cutoff: ${h(numericDate(range.start))} – ${h(numericDate(range.end))} · Asia/Manila</p></div><small>Generated: ${h(generated)}</small></div>
-    <p class="report-policy">Only admin-approved daily attendance enters payroll. Regular time starts at 8:00 AM, includes 12:00–1:00 PM, and may extend after 5:00 PM until 8 hours are complete. OT begins only after 5:00 PM and after 8 regular hours. Work from 10:00 PM–6:00 AM is reported separately as Differential.</p></div>`;
+    <p class="report-policy">Regular time starts at 8:00 AM, includes 12:00–1:00 PM, and may extend after 5:00 PM until 8 hours are complete. OT begins only after 5:00 PM and after 8 regular hours. Work from 10:00 PM–6:00 AM is reported separately as Differential.</p></div>`;
 }
 function renderReportEmployee({ employee, rows, totals }, range, generated) {
   const body = rows.map(row => `<tr><td data-label="Date">${h(numericDate(row.date))}</td>
