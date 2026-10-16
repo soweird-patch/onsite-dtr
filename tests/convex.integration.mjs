@@ -20,37 +20,41 @@ await client.mutation(api.core.updateSettings, { token: admin.token, input: {
 } });
 
 const suffix = Math.random().toString(36).slice(2);
-const workerEmail = `qa-worker-${suffix}@example.test`;
+const workerMobile = `09${String(Math.floor(Math.random() * 1_000_000_000)).padStart(9, '0')}`;
 const workerPassword = `Worker-QA-${suffix}-password`;
 const created = await client.action(api.authActions.createEmployee, { token: admin.token, input: {
-  name: 'QA Worker', email: workerEmail, password: workerPassword, scheduleStart: '08:30',
-  scheduleEnd: '17:30', workdays: [1, 2, 3, 4, 5, 6], graceMinutes: 0, active: true
+  name: 'QA Worker', mobile: workerMobile, password: workerPassword, scheduleStart: '08:00',
+  scheduleEnd: '17:00', workdays: [1, 2, 3, 4, 5, 6], graceMinutes: 0, active: true
 } });
-assert.equal(created.employee.email, workerEmail);
-const worker = await client.action(api.authActions.login, { email: workerEmail, password: workerPassword, remember: true });
+assert.equal(created.employee.mobile, workerMobile);
+const worker = await client.action(api.authActions.login, { identifier: workerMobile, password: workerPassword, remember: true });
 assert.equal(worker.user.role, 'employee');
 await assert.rejects(client.query(api.core.employees, { token: worker.token }), /Not allowed/);
 
 const selfie = `data:image/png;base64,${fs.readFileSync(new URL('../public/icon-192.png', import.meta.url)).toString('base64')}`;
 await assert.rejects(client.action(api.storageActions.punch, { token: worker.token, input: {
-  slot: 'IN', method: 'ONSITE', latitude: 14.6, longitude: 121, accuracyM: 10, note: ''
+  slot: 'IN', latitude: 14.6, longitude: 121, accuracyM: 10, note: ''
 } }), /selfie/i);
 const inResult = await client.action(api.storageActions.punch, { token: worker.token, input: {
-  slot: 'IN', method: 'ONSITE', latitude: 14.6, longitude: 121, accuracyM: 10, note: '', selfie
+  slot: 'IN', latitude: 14.6, longitude: 121, accuracyM: 10, note: '', selfie
 } });
-assert.equal(inResult.punch.verification, 'APPROVED');
+assert.equal(inResult.punch.verification, 'PENDING');
 assert.equal(inResult.punch.hasSelfie, true);
+assert.equal(inResult.punch.method, 'ONSITE');
 await assert.rejects(client.action(api.storageActions.punch, { token: worker.token, input: {
-  slot: 'IN', method: 'ONSITE', latitude: 14.6, longitude: 121, accuracyM: 10, note: '', selfie
+  slot: 'IN', latitude: 14.6, longitude: 121, accuracyM: 10, note: '', selfie
 } }), /already recorded/);
 const outResult = await client.action(api.storageActions.punch, { token: worker.token, input: {
-  slot: 'OUT', method: 'OFFSITE', latitude: 14.7, longitude: 121.1, accuracyM: 10,
+  slot: 'OUT', latitude: 14.7, longitude: 121.1, accuracyM: 10,
   note: 'Client visit', selfie
 } });
 assert.equal(outResult.punch.verification, 'PENDING');
+assert.equal(outResult.punch.method, 'OFFSITE');
 const proof = await client.action(api.storageActions.selfie, { token: admin.token, id: outResult.punch.id });
 assert.match(proof, /^data:image\/png;base64,/);
-await client.mutation(api.core.verify, { token: admin.token, id: outResult.punch.id, verification: 'APPROVED' });
+await client.mutation(api.core.approveAttendanceDay, {
+  token: admin.token, userId: worker.user.id, workDate: inResult.punch.workDate
+});
 const logs = await client.query(api.core.attendance, { token: worker.token });
 assert.equal(logs.punches.length, 2);
 assert.equal(logs.punches.find(p => p.slot === 'OUT').verification, 'APPROVED');
@@ -72,7 +76,7 @@ assert.equal(holidaySettings.customHolidays[0].name, holiday.name);
 assert.equal(holidaySettings.holidays.find(item => item.date === holiday.date)?.name, holiday.name);
 assert.equal(holidaySettings.legalHolidays.find(item => item.date === '2027-02-25')?.type, 'Special working');
 await assert.rejects(client.action(api.storageActions.punch, { token: worker.token, input: {
-  slot: 'IN', method: 'ONSITE', latitude: 14.6, longitude: 121, accuracyM: 10, note: '', selfie
+  slot: 'IN', latitude: 14.6, longitude: 121, accuracyM: 10, note: '', selfie
 } }), /No scheduled work today/);
 
 const logo192 = `data:image/png;base64,${fs.readFileSync(new URL('../public/icon-192.png', import.meta.url)).toString('base64')}`;

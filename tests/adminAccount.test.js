@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { deleteAdminAccount, deleteDemoEmployee, registerFirstAdmin, signupStatus, updateProfileImage } from '../convex/core.js';
+import { deleteAdminAccount, deleteEmployee, registerFirstAdmin, signupStatus, updateProfileImage } from '../convex/core.js';
 import { deleteAdminAccount as deleteAction, registerFirstAdmin as signupAction } from '../convex/authActions.js';
 
 function fakeContext() {
@@ -65,30 +65,29 @@ test('first admin can register after deletion without erasing employee or site d
   assert.equal(tables.settings.size, 1);
 });
 
-test('admin can delete a demo with all test records but cannot delete a regular employee', async () => {
+test('admin can delete an employee account and all related records', async () => {
   const { ctx, tables, deletedFiles } = fakeContext();
   const token = 'd'.repeat(64);
   const adminId = await ctx.db.insert('users', { name: 'Admin', email: 'admin@example.test', role: 'admin', active: true });
-  const normalId = await ctx.db.insert('users', { name: 'Normal', email: 'normal@example.test', role: 'employee', active: true });
-  const demoId = await ctx.db.insert('users', { name: 'Demo', email: 'demo@example.test', role: 'employee', active: true, isDemo: true, profileImageId: 'photo:profile' });
+  const employeeId = await ctx.db.insert('users', { name: 'Employee', mobile: '09171234567', role: 'employee', active: true, profileImageId: 'photo:profile' });
+  const remainingId = await ctx.db.insert('users', { name: 'Remaining', mobile: '09171234568', role: 'employee', active: true });
   await ctx.db.insert('sessions', { userId: adminId, tokenHash: createHash('sha256').update(token).digest('hex'), expiresAt: Date.now() + 86400000 });
-  await ctx.db.insert('sessions', { userId: demoId, tokenHash: 'demo-token', expiresAt: Date.now() + 86400000 });
-  await ctx.db.insert('punches', { userId: demoId, workDate: '2026-10-15', selfieId: 'photo:proof' });
-  await ctx.db.insert('punches', { userId: normalId, workDate: '2026-10-15' });
-  await ctx.db.insert('extensions', { userId: demoId, workDate: '2026-10-15' });
-  await ctx.db.insert('overtime', { userId: demoId, workDate: '2026-10-15' });
-  await ctx.db.insert('loginAttempts', { email: 'demo@example.test', count: 1, until: 0 });
-  await assert.rejects(deleteDemoEmployee._handler(ctx, { token, id: normalId }), /Only demo/);
-  assert(await ctx.db.get(normalId));
-  await deleteDemoEmployee._handler(ctx, { token, id: demoId });
-  assert.equal(await ctx.db.get(demoId), null);
+  await ctx.db.insert('sessions', { userId: employeeId, tokenHash: 'employee-token', expiresAt: Date.now() + 86400000 });
+  await ctx.db.insert('punches', { userId: employeeId, workDate: '2026-10-15', selfieId: 'photo:proof' });
+  await ctx.db.insert('punches', { userId: remainingId, workDate: '2026-10-15' });
+  await ctx.db.insert('extensions', { userId: employeeId, workDate: '2026-10-15' });
+  await ctx.db.insert('overtime', { userId: employeeId, workDate: '2026-10-15' });
+  await ctx.db.insert('loginAttempts', { email: '09171234567', count: 1, until: 0 });
+  await deleteEmployee._handler(ctx, { token, id: employeeId });
+  assert.equal(await ctx.db.get(employeeId), null);
+  assert(await ctx.db.get(remainingId));
   assert.equal(tables.sessions.size, 1);
   assert.equal(tables.punches.size, 1);
   assert.equal(tables.extensions.size, 0);
   assert.equal(tables.overtime.size, 0);
   assert.equal(tables.loginAttempts.size, 0);
   assert.deepEqual(deletedFiles, ['photo:proof', 'photo:profile']);
-  assert.equal([...tables.audit.values()].at(-1).action, 'demo_employee_delete');
+  assert.equal([...tables.audit.values()].at(-1).action, 'employee_delete');
 });
 
 test('signup action accepts a profile image and deletion requires the password', async () => {

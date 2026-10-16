@@ -20,30 +20,31 @@ function passwordMatches(password, stored) {
 
 async function storeProfilePhoto(ctx, image) {
   const match = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(image || '');
-  if (!match || match[2].length > 2_700_000) throw new Error('Choose a profile photo under 2 MB.');
+  if (!match || match[2].length > 1_050_000) throw new Error('Choose a compressed profile photo under 750 KB.');
   const bytes = Buffer.from(match[2], 'base64');
   const type = `image/${match[1]}`;
   const valid = type === 'image/jpeg' ? bytes[0] === 0xff && bytes[1] === 0xd8
     : type === 'image/png' ? bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
       : bytes.subarray(0, 4).toString() === 'RIFF' && bytes.subarray(8, 12).toString() === 'WEBP';
-  if (!valid || bytes.length < 1000 || bytes.length > 2_000_000)
-    throw new Error('Profile photo must be a PNG, JPG, or WebP image under 2 MB.');
+  if (!valid || bytes.length < 1000 || bytes.length > 750_000)
+    throw new Error('Profile photo must be a PNG, JPG, or WebP image under 750 KB.');
   return ctx.storage.store(new Blob([bytes], { type }));
 }
 
-export const login = action({ args: { email: v.string(), password: v.string(), remember: v.boolean() }, handler: async (ctx, args) => {
-  const email = args.email.trim().toLowerCase();
-  if (email.length > 200 || args.password.length > 1024) throw new Error('Invalid email or password.');
-  const attempt = await ctx.runQuery(internal.core.loginAttempt, { email });
+export const login = action({ args: { identifier: v.string(), password: v.string(), remember: v.boolean() }, handler: async (ctx, args) => {
+  const identifier = args.identifier.trim().toLowerCase();
+  if (identifier.length > 200 || (!/^\d{11}$/.test(identifier) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier)) || args.password.length > 1024)
+    throw new Error('Invalid email, mobile number, or password.');
+  const attempt = await ctx.runQuery(internal.core.loginAttempt, { email: identifier });
   if (attempt && attempt.until > Date.now() && attempt.count >= 5) throw new Error('Too many attempts. Try again later.');
-  const user = await ctx.runQuery(internal.core.userForLogin, { email });
+  const user = await ctx.runQuery(internal.core.userForLogin, { identifier });
   if (!user?.active || !passwordMatches(args.password, user.passwordHash)) {
-    await ctx.runMutation(internal.core.recordLoginFailure, { email });
-    throw new Error('Invalid email or password.');
+    await ctx.runMutation(internal.core.recordLoginFailure, { email: identifier });
+    throw new Error('Invalid email, mobile number, or password.');
   }
   const token = randomBytes(32).toString('hex');
   const tokenHash = createHash('sha256').update(token).digest('hex');
-  const result = await ctx.runMutation(internal.core.issueSession, { userId: user._id, tokenHash, remember: args.remember, email });
+  const result = await ctx.runMutation(internal.core.issueSession, { userId: user._id, tokenHash, remember: args.remember, email: identifier });
   return { ...result, token };
 }});
 

@@ -1,27 +1,37 @@
 import { ConvexHttpClient } from 'convex/browser';
 import { api as functions } from '../convex/_generated/api.js';
-import { holidayFor, isScheduledWorkday, localDateTime, shiftInstant, workBreakdown } from '../rules.js';
+import { holidayFor, isPayrollReady, isScheduledWorkday, localDateTime, shiftInstant, workBreakdown } from '../rules.js';
 
 const root = document.getElementById('app');
 const deploymentUrl = import.meta.env.VITE_CONVEX_URL;
 const client = deploymentUrl ? new ConvexHttpClient(deploymentUrl) : null;
 let accessToken = localStorage.getItem('dtr_token') || sessionStorage.getItem('dtr_token') || '';
+let toastTimer = null;
 const state = {
   session: null, section: 'home', employeeData: { punches: [], extensions: [], overtime: [], openShift: null },
   branding: { appName: 'Onsite DTR', logo192Url: null, logo512Url: null },
   signupAvailable: false, authMode: 'login', signupPhoto: null,
   employees: [], adminData: { punches: [], extensions: [], overtime: [] }, historyRange: null,
-  adminRange: null, reportRange: null, includeDemoReport: false, selectedEmployee: null, capture: null,
-  cameraStream: null, sitePromptedDate: null, installPrompt: null, modal: null, auditItems: [],
+  adminRange: null, reportRange: null, selectedEmployee: null, capture: null,
+  cameraStream: null, sitePromptedDate: null, onsiteAccess: null, installPrompt: null, installDismissed: false, modal: null, auditItems: [],
   message: '', messageType: 'notice'
 };
 
 const h = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+const workdayLabel = days => (days || []).map(day => ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][day]).join(', ') || 'None selected';
 const today = () => state.session?.today;
 const config = () => state.session?.settings;
 const currentRange = () => state.session?.cutoff;
 const timeZone = 'Asia/Manila';
 const toMinutes = text => Number(text?.slice(0, 2) || 0) * 60 + Number(text?.slice(3, 5) || 0);
+const appInstalled = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+const iosBrowser = () => /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
+
+function installPromptMarkup(extraClass = '') {
+  if (appInstalled() || state.installDismissed || (!state.installPrompt && !iosBrowser())) return '';
+  const ios = iosBrowser() && !state.installPrompt;
+  return `<aside class="install-banner ${h(extraClass)}" aria-label="Install ${h(state.branding.appName)}"><div class="install-mark">${brandIconMarkup()}</div><div class="install-copy"><strong>Install ${h(state.branding.appName)}</strong><p>${ios ? 'On iPhone or iPad, tap Share then “Add to Home Screen”.' : 'Add this app to your device for faster, full-screen attendance access.'}</p></div><div class="install-actions">${ios ? '' : '<button class="btn small" data-action="install">Install</button>'}<button class="install-close" data-action="dismiss-install" aria-label="Dismiss install prompt">×</button></div></aside>`;
+}
 
 async function api(path, options = {}) {
   if (!client) throw new Error('Convex is not configured. Set VITE_CONVEX_URL and rebuild the PWA.');
@@ -32,7 +42,7 @@ async function api(path, options = {}) {
   const to = parsed.searchParams.get('to') || undefined;
   try {
     if (route === '/api/login') {
-      const result = await client.action(functions.authActions.login, { email: input.email, password: input.password, remember: !!input.remember });
+      const result = await client.action(functions.authActions.login, { identifier: input.identifier, password: input.password, remember: !!input.remember });
       accessToken = result.token;
       const storage = input.remember ? localStorage : sessionStorage;
       localStorage.removeItem('dtr_token'); sessionStorage.removeItem('dtr_token');
@@ -72,12 +82,14 @@ async function api(path, options = {}) {
       : await client.query(functions.core.employees, { token: accessToken });
     const employeeId = /^\/api\/admin\/employees\/(.+)$/.exec(route)?.[1];
     if (employeeId) return options.method === 'DELETE'
-      ? await client.mutation(functions.core.deleteDemoEmployee, { token: accessToken, id: employeeId })
+      ? await client.mutation(functions.core.deleteEmployee, { token: accessToken, id: employeeId })
       : await client.action(functions.authActions.updateEmployee, { token: accessToken, id: employeeId, input });
     if (route === '/api/admin/attendance') return options.method === 'POST'
       ? await client.mutation(functions.core.backfill, { token: accessToken, input })
       : await client.query(functions.core.adminAttendance, { token: accessToken, from, to, employeeId: parsed.searchParams.get('employeeId') || undefined });
     if (route === '/api/admin/audit') return await client.query(functions.core.auditItems, { token: accessToken });
+    if (route === '/api/admin/attendance/day/approve') return await client.mutation(functions.core.approveAttendanceDay,
+      { token: accessToken, userId: input.userId, workDate: input.workDate });
     const verifyId = /^\/api\/admin\/punches\/(.+)\/verify$/.exec(route)?.[1];
     if (verifyId) return await client.mutation(functions.core.verify, { token: accessToken, id: verifyId, verification: input.verification, reason: input.reason || undefined });
     const extensionId = /^\/api\/admin\/extensions\/(.+)\/review$/.exec(route)?.[1];
@@ -94,11 +106,61 @@ async function api(path, options = {}) {
   }
 }
 
+function hideToast() {
+  const toast = document.getElementById('toast');
+  if (!toast) return;
+  toast.classList.remove('toast-show');
+  toast.setAttribute('aria-hidden', 'true');
+  window.setTimeout(() => toast.remove(), 220);
+}
 function flash(message, type = 'notice') {
   state.message = message; state.messageType = type;
   const box = document.getElementById('flash');
   if (box) { box.className = `notice ${type}`; box.textContent = message; box.hidden = false; }
   else render();
+
+  if (toastTimer) window.clearTimeout(toastTimer);
+  document.getElementById('toast')?.remove();
+
+  const normalizedType = ['success', 'error', 'warn'].includes(type) ? type : 'notice';
+  const lowerMessage = String(message).toLowerCase();
+  const title = normalizedType === 'error' ? 'Action failed'
+    : normalizedType === 'warn' ? 'Attention needed'
+      : normalizedType === 'success' && /(delete|remove)/.test(lowerMessage) ? 'Deleted successfully'
+        : normalizedType === 'success' && /approv/.test(lowerMessage) ? 'Approved successfully'
+          : normalizedType === 'success' ? 'Saved successfully' : 'Update';
+  const icons = { success: '✓', error: '!', warn: '!', notice: 'i' };
+  const toast = document.createElement('aside');
+  toast.id = 'toast';
+  toast.className = `app-toast toast-${normalizedType}`;
+  toast.setAttribute('role', normalizedType === 'error' ? 'alert' : 'status');
+  toast.setAttribute('aria-live', normalizedType === 'error' ? 'assertive' : 'polite');
+  toast.setAttribute('aria-hidden', 'false');
+
+  const icon = document.createElement('span');
+  icon.className = 'toast-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = icons[normalizedType];
+  const copy = document.createElement('div');
+  copy.className = 'toast-copy';
+  const heading = document.createElement('strong');
+  heading.textContent = title;
+  const detail = document.createElement('p');
+  detail.textContent = message;
+  copy.append(heading, detail);
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'toast-close';
+  close.setAttribute('aria-label', 'Close notification');
+  close.textContent = '×';
+  close.addEventListener('click', () => {
+    if (toastTimer) window.clearTimeout(toastTimer);
+    hideToast();
+  });
+  toast.append(icon, copy, close);
+  document.body.append(toast);
+  window.requestAnimationFrame(() => toast.classList.add('toast-show'));
+  toastTimer = window.setTimeout(hideToast, normalizedType === 'error' ? 6500 : 4500);
 }
 function formatTime(iso) {
   if (!iso) return '—';
@@ -122,9 +184,18 @@ function time24(iso) {
   if (!iso) return '';
   return new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(iso));
 }
+function formatClockText(value) {
+  if (!/^\d{2}:\d{2}$/.test(value || '')) return value || '—';
+  const [hours, minutes] = value.split(':').map(Number);
+  return `${hours % 12 || 12}:${String(minutes).padStart(2, '0')} ${hours >= 12 ? 'PM' : 'AM'}`;
+}
 function prettyDate(date) {
   if (!date) return '';
   return new Intl.DateTimeFormat('en-PH', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`));
+}
+function numericDate(date) {
+  if (!date) return '';
+  return new Intl.DateTimeFormat('en-PH', { month: '2-digit', day: '2-digit', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`));
 }
 function incomingHolidays(limit = 4) {
   const dates = new Map((config()?.legalHolidays || []).filter(item => item.type === 'Special working').map(item => [item.date, item]));
@@ -132,10 +203,23 @@ function incomingHolidays(limit = 4) {
   return [...dates.values()].filter(item => item.date >= today()).sort((a, b) => a.date.localeCompare(b.date)).slice(0, limit);
 }
 function holidayList(holidays) {
-  return holidays.length ? `<div class="holiday-list">${holidays.map(item => `<div class="holiday-item"><div class="holiday-date"><strong>${h(new Intl.DateTimeFormat('en-PH', { month: 'short', timeZone: 'UTC' }).format(new Date(`${item.date}T00:00:00Z`)))}</strong><span>${h(item.date.slice(8))}</span></div><div class="holiday-info"><strong>${h(item.name)}</strong><small>${h(item.type || 'Company holiday')} · ${item.nonWorking === false ? 'Workday' : 'No work scheduled'}</small></div>${item.source ? `<a class="holiday-source" href="${h(item.source)}" target="_blank" rel="noopener noreferrer" aria-label="Official source for ${h(item.name)}">Source ↗</a>` : ''}</div>`).join('')}</div>` : '<div class="empty">No published upcoming holidays in this calendar yet.</div>';
+  if (!holidays.length) return '<div class="holiday-empty"><span aria-hidden="true">◇</span><strong>Calendar is clear</strong><p>No published upcoming holidays yet.</p></div>';
+  const current = Date.parse(`${today()}T00:00:00Z`);
+  return `<div class="holiday-list">${holidays.map((item, index) => {
+    const date = new Date(`${item.date}T00:00:00Z`);
+    const daysAway = Math.round((date.getTime() - current) / 86400000);
+    const proximity = daysAway === 0 ? 'Today' : daysAway === 1 ? 'Tomorrow' : `In ${daysAway} days`;
+    const noWork = item.nonWorking !== false;
+    return `<article class="holiday-item ${index === 0 ? 'is-next' : ''}">
+      <div class="holiday-date"><strong>${h(new Intl.DateTimeFormat('en-PH', { month: 'short', timeZone: 'UTC' }).format(date))}</strong><span>${h(item.date.slice(8))}</span><small>${h(new Intl.DateTimeFormat('en-PH', { weekday: 'short', timeZone: 'UTC' }).format(date))}</small></div>
+      <div class="holiday-info"><div class="holiday-kicker">${index === 0 ? `<span class="holiday-next">Next · ${h(proximity)}</span>` : `<span>${h(proximity)}</span>`}<span class="holiday-status ${noWork ? 'no-work' : 'workday'}">${noWork ? 'No work' : 'Workday'}</span></div><strong>${h(item.name)}</strong><small>${h(item.type || 'Company holiday')}</small></div>
+      ${item.source ? `<a class="holiday-source" href="${h(item.source)}" target="_blank" rel="noopener noreferrer" aria-label="View official source for ${h(item.name)}"><span>Official source</span> ↗</a>` : '<span class="holiday-company">Company calendar</span>'}
+    </article>`;
+  }).join('')}</div>`;
 }
 function renderHolidayCard(limit = 4) {
-  return `<section class="card wide"><div class="card-title"><span class="symbol">▦</span> INCOMING HOLIDAYS</div><p class="card-sub">Nationwide Philippine holidays and company no-work dates.</p>${holidayList(incomingHolidays(limit))}<p class="tiny-label holiday-note">Published national dates for 2026–2027. Eid dates for 2027 need a separate proclamation and calendar update. Admin can add local holidays.</p></section>`;
+  const holidays = incomingHolidays(limit);
+  return `<section class="card wide holiday-card"><div class="holiday-card-head"><div><div class="card-title"><span class="symbol">▦</span> UPCOMING HOLIDAYS</div><p class="card-sub">Philippine public holidays and company no-work dates.</p></div><span class="holiday-count">${holidays.length} upcoming</span></div>${holidayList(holidays)}<div class="holiday-note"><span aria-hidden="true">ⓘ</span><p>National dates for 2026–2027 are included. Admins can manage company dates from Holiday settings.</p></div></section>`;
 }
 function dateSpan(range) { return `${prettyDate(range.start || range.from)} – ${prettyDate(range.end || range.to)}`; }
 function weekday(date) { return new Date(`${date}T00:00:00Z`).getUTCDay(); }
@@ -151,6 +235,39 @@ function cutoffFor(date) {
   if (sd === starts[1]) { nm++; if (nm === 13) { nm = 1; ny++; } }
   const pad = n => String(n).padStart(2, '0');
   return { start: `${sy}-${pad(sm)}-${pad(sd)}`, end: yesterday(`${ny}-${pad(nm)}-${pad(nd)}`) };
+}
+function monthDate(month, day) { return `${month}-${String(day).padStart(2, '0')}`; }
+function nextMonth(month) {
+  const [year, value] = month.split('-').map(Number);
+  const date = new Date(Date.UTC(year, value, 1));
+  return date.toISOString().slice(0, 7);
+}
+function monthEnd(month) { return yesterday(`${nextMonth(month)}-01`); }
+function payrollRanges(month, firstStart, secondStart) {
+  return {
+    first: { start: firstStart, end: yesterday(secondStart) },
+    second: { start: secondStart, end: yesterday(monthDate(nextMonth(month), Number(firstStart.slice(8)))) }
+  };
+}
+function payrollPreviewMarkup(month, firstStart, secondStart) {
+  if (!month || !firstStart || !secondStart || !firstStart.startsWith(`${month}-`) || !secondStart.startsWith(`${month}-`) || firstStart >= secondStart)
+    return '<p class="tiny-label">Choose two start dates in order within the selected month.</p>';
+  const ranges = payrollRanges(month, firstStart, secondStart);
+  return `<div class="cutoff-preview-row"><span>First cutoff</span><strong>${h(dateSpan(ranges.first))}</strong></div><div class="cutoff-preview-row"><span>Second cutoff</span><strong>${h(dateSpan(ranges.second))}</strong></div>`;
+}
+function syncPayrollEditor(resetDates = false) {
+  const form = document.getElementById('payroll-settings-form');
+  if (!form) return;
+  const month = form.elements.payrollMonth.value;
+  if (!month) return;
+  const min = `${month}-01`, max = monthEnd(month);
+  for (const input of [form.elements.firstStart, form.elements.secondStart]) { input.min = min; input.max = max; }
+  if (resetDates || !form.elements.firstStart.value.startsWith(`${month}-`)) {
+    form.elements.firstStart.value = monthDate(month, config().cutoffDays[0]);
+    form.elements.secondStart.value = monthDate(month, config().cutoffDays[1]);
+  }
+  const preview = document.getElementById('payroll-preview');
+  if (preview) preview.innerHTML = payrollPreviewMarkup(month, form.elements.firstStart.value, form.elements.secondStart.value);
 }
 function rangeUrl(path, range, employeeId) {
   const query = new URLSearchParams({ from: range.start, to: range.end });
@@ -184,14 +301,20 @@ function badge(punch) {
 }
 function minutesStatus(inPunch, outPunch, employee, date) {
   if (!isScheduledWorkday(date, employee.workdays, config().holidays)) return { late: 0, early: 0 };
+  if (!inPunch || !outPunch) return { late: 0, early: 0 };
+  const hours = premiumBreakdown(date, inPunch, outPunch);
+  const arrivalDelay = Math.max(0, toMinutes(time24(inPunch.timeUtc)) - 8 * 60);
   return {
-    late: inPunch ? Math.max(0, toMinutes(time24(inPunch.timeUtc)) - 8 * 60) : 0,
-    early: outPunch ? premiumBreakdown(date, inPunch, outPunch).undertimeMinutes : 0
+    late: arrivalDelay >= 60 ? Math.min(arrivalDelay, hours.undertimeMinutes) : 0,
+    early: hours.undertimeMinutes
   };
 }
-function brandMarkup() {
+function brandIconMarkup() {
   const logo = state.branding.logo192Url;
-  return `${logo ? `<img class="brand-icon brand-image" src="${h(logo)}" alt="">` : '<span class="brand-icon">◈</span>'}<span>${h(state.branding.appName)}</span>`;
+  return `<img class="brand-icon brand-image" src="${h(logo || '/icon-192.png')}" alt="">`;
+}
+function brandMarkup() {
+  return `${brandIconMarkup()}<span>${h(state.branding.appName)}</span>`;
 }
 async function loadBranding() {
   try {
@@ -225,10 +348,28 @@ function locationText(p) {
   if (p.method === 'SYSTEM') return 'Automatic 6:00 AM cutoff';
   return `${p.method === 'ONSITE' ? 'Site GPS' : 'Field GPS'} · ±${Math.round(p.accuracyM || 0)} m`;
 }
-function mapLink(p) {
+function mapLink(p, label = 'Open in Google Maps ↗') {
   if (p?.latitude == null || p?.longitude == null) return '';
   const lat = Number(p.latitude), lng = Number(p.longitude);
-  return `<a href="https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=18/${lat}/${lng}" target="_blank" rel="noopener noreferrer">Open map pin ↗</a>`;
+  return `<a href="https://www.google.com/maps/search/?api=1&amp;query=${lat},${lng}" target="_blank" rel="noopener noreferrer">${h(label)}</a>`;
+}
+function detectedPunchMethod(location, extension = null) {
+  if (extension) return 'OFFSITE';
+  const site = config();
+  if (!location || !site?.configured) return 'OFFSITE';
+  return haversine(location.latitude, location.longitude, site.siteLat, site.siteLng) <= site.radiusM ? 'ONSITE' : 'OFFSITE';
+}
+function recentAttendanceFolders(punches) {
+  const grouped = new Map();
+  for (const punch of punches) {
+    if (!grouped.has(punch.workDate)) grouped.set(punch.workDate, {});
+    grouped.get(punch.workDate)[punch.slot] = punch;
+  }
+  const entries = [...grouped.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+  return `<section class="card attendance-folders-card"><div class="attendance-folders-head"><div><div class="card-title"><span class="symbol">▤</span> RECENT ATTENDANCE</div><p class="card-sub">Your latest Time In and Time Out records.</p></div><button class="link-button" data-nav="history">View all ›</button></div>${entries.length ? `<div class="attendance-folders">${entries.map(([date, pair]) => {
+    const status = statusOf(pair.IN, pair.OUT);
+    return `<article class="attendance-folder"><div class="attendance-folder-tab"><strong>${h(prettyDate(date))}</strong><span class="${pair.OUT ? 'complete' : ''}">${h(status)}</span></div><div class="attendance-folder-times"><div><span>TIME IN</span><strong>${h(formatTime(pair.IN?.timeUtc))}</strong><small>${h(punchSource(pair.IN))}</small>${pair.IN ? mapLink(pair.IN, 'View map ↗') : ''}</div><div><span>TIME OUT</span><strong>${h(formatTime(pair.OUT?.timeUtc))}</strong><small>${h(punchSource(pair.OUT))}</small>${pair.OUT ? mapLink(pair.OUT, 'View map ↗') : ''}</div></div></article>`;
+  }).join('')}</div>` : '<div class="holiday-empty"><span aria-hidden="true">◷</span><strong>No attendance yet</strong><p>Your first punch will appear here.</p></div>'}</section>`;
 }
 
 async function refreshSession() { state.session = await api('/api/session'); }
@@ -237,8 +378,8 @@ async function loadEmployee(range = state.historyRange || currentRange()) {
   state.employeeData = await api(rangeUrl('/api/attendance', range));
 }
 async function loadEmployees() { state.employees = (await api('/api/admin/employees')).employees; }
-async function loadAdmin(range = state.adminRange || currentRange(), employeeId = null) {
-  state.adminRange = range;
+async function loadAdmin(range = state.adminRange || currentRange(), employeeId = null, rememberRange = true) {
+  if (rememberRange) state.adminRange = range;
   state.adminData = await api(rangeUrl('/api/admin/attendance', range, employeeId));
 }
 async function go(section) {
@@ -247,18 +388,19 @@ async function go(section) {
     if (state.session.user.role === 'employee' && ['home', 'history'].includes(section)) await loadEmployee(section === 'home' ? currentRange() : state.historyRange || currentRange());
     if (state.session.user.role === 'admin') {
       if (['dashboard', 'employees', 'backfill', 'records', 'report'].includes(section)) await loadEmployees();
-      if (['dashboard', 'records', 'report'].includes(section)) await loadAdmin(section === 'dashboard' ? currentRange() : section === 'report' ? state.reportRange || currentRange() : state.adminRange || currentRange());
+      if (section === 'dashboard') await loadAdmin(currentRange(), null, false);
+      if (section === 'records') await loadAdmin(state.adminRange || { start: today(), end: today() });
+      if (section === 'report') await loadAdmin(state.reportRange || currentRange(), null, false);
       if (section === 'audit') state.auditItems = (await api('/api/admin/audit')).items;
     }
   } catch (error) { flash(error.message, 'error'); }
   render();
   window.scrollTo(0, 0);
-  if (section === 'home' && state.session?.user.role === 'employee') checkSitePrompt();
 }
 
 function renderLogin() {
   const signup = state.signupAvailable && state.authMode === 'signup';
-  root.innerHTML = `<div class="login-wrap"><div class="login-art"><div class="brand">${brandMarkup()}</div><div><div class="headline">Attendance made clear, wherever work happens.</div><p>Record onsite and field work with verified time, selfie, and GPS proof.</p></div><small class="muted">Secure employee and admin access</small></div><div class="login-panel"><div class="login-box"><p class="eyebrow">${signup ? 'FIRST ADMIN ACCOUNT' : 'WELCOME BACK'}</p><h1>${signup ? 'Create your admin account' : 'Sign in to your DTR'}</h1><p>${signup ? 'No administrator is registered. The first account created here becomes the administrator.' : 'Use the account created by your administrator.'}</p>${state.message ? `<div class="notice ${h(state.messageType)}">${h(state.message)}</div>` : ''}${signup ? `<form id="signup-form"><div class="field"><label for="signup-name">Full name</label><input id="signup-name" name="name" minlength="2" maxlength="120" autocomplete="name" required></div><div class="field"><label for="signup-email">Email address</label><input id="signup-email" name="email" type="email" autocomplete="email" required></div><div class="field-row"><div class="field"><label for="signup-password">Password (8+ characters)</label><input id="signup-password" name="password" type="password" minlength="8" autocomplete="new-password" required></div><div class="field"><label for="signup-confirm">Confirm password</label><input id="signup-confirm" name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required></div></div><div class="field"><label for="signup-photo">Profile picture (optional)</label><input id="signup-photo" type="file" accept="image/png,image/jpeg,image/webp"><img id="signup-photo-preview" class="profile-photo-preview ${state.signupPhoto ? '' : 'hidden'}" src="${state.signupPhoto || ''}" alt="Profile photo preview"><p class="tiny-label">PNG, JPG, or WebP · up to 5 MB.</p></div><label class="check-row"><input type="checkbox" name="remember" checked> Remember me on this device</label><button class="btn block" type="submit">Create admin account →</button></form><button class="link-button auth-switch" data-action="auth-login">Have an employee account? Sign in</button>` : `<form id="login-form"><div class="field"><label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="username" required></div><div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required></div><label class="check-row"><input type="checkbox" name="remember" checked> Remember me on this device</label><button class="btn block" type="submit">Sign in →</button></form>${state.signupAvailable ? '<button class="link-button auth-switch" data-action="auth-signup">Create the first admin account</button>' : '<p class="tiny-label" style="margin-top:20px">Forgot your password? Ask your administrator for a reset.</p>'}`}</div></div></div>`;
+  root.innerHTML = `${installPromptMarkup('floating-install')}<div class="login-wrap"><section class="login-art" aria-label="Philippine AODA Power Corp. generator facility"><div class="login-company"><div class="login-company-logo">${brandIconMarkup()}</div><div class="login-company-name"><span>PHILIPPINE</span><strong>AODA POWER CORP.</strong></div></div><div class="login-hero-copy"><span class="login-hero-rule"></span><div class="headline">Reliable power.<br>Accountable work.</div></div><div class="login-art-footer"><span>GENSET OPERATIONS</span><span>DIGITAL TIME RECORD</span></div></section><section class="login-panel"><div class="login-mobile-brand"><div class="login-company-logo">${brandIconMarkup()}</div><div class="login-company-name"><span>PHILIPPINE</span><strong>AODA POWER CORP.</strong></div></div><div class="login-box"><div class="login-form-mark">${brandIconMarkup()}</div><p class="eyebrow">${signup ? 'ADMIN SETUP' : 'SECURE ACCESS'}</p><h1>${signup ? 'Create admin account' : 'Welcome back'}</h1>${state.message ? `<div class="notice ${h(state.messageType)}">${h(state.message)}</div>` : ''}${signup ? `<form id="signup-form"><div class="field"><label for="signup-name">Full name</label><input id="signup-name" name="name" minlength="2" maxlength="120" autocomplete="name" required></div><div class="field"><label for="signup-email">Email address</label><input id="signup-email" name="email" type="email" autocomplete="email" required></div><div class="field-row"><div class="field"><label for="signup-password">Password</label><input id="signup-password" name="password" type="password" minlength="8" autocomplete="new-password" placeholder="8+ characters" required></div><div class="field"><label for="signup-confirm">Confirm password</label><input id="signup-confirm" name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required></div></div><div class="field"><label for="signup-photo">Profile picture</label><input id="signup-photo" type="file" accept="image/png,image/jpeg,image/webp"><img id="signup-photo-preview" class="profile-photo-preview ${state.signupPhoto ? '' : 'hidden'}" src="${state.signupPhoto || ''}" alt="Profile photo preview"></div><label class="check-row"><input type="checkbox" name="remember" checked> Keep me signed in</label><button class="btn block login-submit" type="submit">Create account <span aria-hidden="true">→</span></button></form><button class="link-button auth-switch" data-action="auth-login">Return to sign in</button>` : `<form id="login-form"><div class="field"><label for="identifier">Email or mobile number</label><input id="identifier" name="identifier" type="text" inputmode="email" maxlength="200" autocomplete="username" placeholder="Enter your account" required></div><div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></div><label class="check-row"><input type="checkbox" name="remember" checked> Keep me signed in</label><button class="btn block login-submit" type="submit">Sign in <span aria-hidden="true">→</span></button></form>${state.signupAvailable ? '<button class="link-button auth-switch" data-action="auth-signup">Set up administrator access</button>' : ''}`}</div><div class="login-panel-footer"><span>${h(state.branding.appName)}</span><span>Asia/Manila</span></div></section></div>`;
 }
 
 const employeeNav = [['home', '⌂', 'Home'], ['history', '▤', 'Attendance'], ['capture', '◎', 'Time clock'], ['profile', '◉', 'Profile']];
@@ -266,7 +408,7 @@ const adminNav = [['dashboard', '⌂', 'Home'], ['records', '▤', 'Records'], [
 function renderShell() {
   const user = state.session.user, admin = user.role === 'admin';
   const nav = admin ? adminNav : employeeNav;
-  root.innerHTML = `<div class="shell"><header class="topbar"><div class="brand">${brandMarkup()}</div><div class="top-right"><span class="tiny-label">${admin ? 'Admin' : 'Employee'} · ${h(user.name)}</span><button class="avatar" data-nav="profile" aria-label="Open ${h(user.name)} profile">${avatarMarkup(user)}</button></div></header><div id="offline" class="offline hidden">Offline — punches cannot be submitted. Contact admin if needed.</div><main class="container"><div id="flash" class="notice ${h(state.messageType)}" ${state.message ? '' : 'hidden'}>${h(state.message)}</div><div id="view"></div></main><nav class="bottom-nav" aria-label="Main navigation"><div class="bottom-inner">${nav.map(([id, icon, label]) => `<button class="nav-item ${state.section === id ? 'active' : ''}" data-nav="${id}" aria-label="${label}"><span class="nav-icon">${icon}</span>${label}</button>`).join('')}</div></nav></div><div id="modal-root"></div>`;
+  root.innerHTML = `<div class="shell"><header class="topbar"><div class="brand">${brandMarkup()}</div><div class="top-right"><span class="tiny-label">${admin ? 'Admin' : 'Employee'} · ${h(user.name)}</span><button class="avatar" data-nav="profile" aria-label="Open ${h(user.name)} profile">${avatarMarkup(user)}</button></div></header><div id="offline" class="offline hidden">Offline — punches cannot be submitted. Contact admin if needed.</div><main class="container">${installPromptMarkup()}<div id="flash" class="notice ${h(state.messageType)}" ${state.message ? '' : 'hidden'}>${h(state.message)}</div><div id="view"></div></main><nav class="bottom-nav" aria-label="Main navigation"><div class="bottom-inner">${nav.map(([id, icon, label]) => `<button class="nav-item ${state.section === id ? 'active' : ''}" data-nav="${id}" aria-label="${label}"><span class="nav-icon">${icon}</span>${label}</button>`).join('')}</div></nav></div><div id="modal-root"></div>`;
   renderView(); updateOnline();
   if (state.modal) showModal(state.modal);
 }
@@ -286,7 +428,7 @@ function renderEmployeeHome() {
   const days = new Set(punches.filter(p => p.slot === 'IN' && p.verification !== 'REJECTED' &&
     p.workDate >= current.start && p.workDate <= current.end).map(p => p.workDate));
   const late = punches.filter(p => p.slot === 'IN' && p.workDate >= current.start && p.workDate <= current.end)
-    .reduce((n, p) => n + minutesStatus(p, null, user, p.workDate).late, 0);
+    .reduce((n, p) => n + minutesStatus(p, punches.find(q => q.workDate === p.workDate && q.slot === 'OUT'), user, p.workDate).late, 0);
   const undertime = punches.filter(p => p.slot === 'OUT' && p.workDate >= current.start && p.workDate <= current.end)
     .reduce((n, p) => n + premiumBreakdown(p.workDate,
       punches.find(q => q.workDate === p.workDate && q.slot === 'IN'), p).undertimeMinutes, 0);
@@ -295,10 +437,22 @@ function renderEmployeeHome() {
   const canContinue = action === 'OUT' && !extension && clock >= 17 * 60 && clock < 22 * 60;
   const extra = runningBreakdown(workDate, inPunch, outPunch, extension);
   return `<div class="hero"><p class="eyebrow">${h(prettyDate(today()))}</p><h1>${greeting()}, ${h(user.name.split(' ')[0])}</h1><p>Here's your attendance at a glance.</p></div>
-    <div class="grid"><section class="card wide"><div class="card-title"><span class="symbol">◷</span> ${state.employeeData.openShift ? 'OVERNIGHT SHIFT' : "TODAY'S ATTENDANCE"}</div><div class="pill ${statusOf(inPunch,outPunch) === 'Present' ? '' : 'pending'}">${h(holiday && !inPunch && !outPunch ? `Holiday · ${holiday.name}` : statusOf(inPunch,outPunch))}</div><p class="card-sub">Work date: ${h(prettyDate(workDate))}</p><div class="punch-line"><span>AM In</span><strong class="${inPunch ? '' : 'missing'}">${h(formatTime(inPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(inPunch)} ${h(locationText(inPunch))}</div><div class="punch-line"><span>Time Out</span><strong class="${outPunch ? '' : 'missing'}">${h(formatTime(outPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(outPunch)} ${h(locationText(outPunch))}</div><div class="divider"></div><p class="card-sub">Regular: 8:00 AM–5:00 PM (9 hours including break) · Overtime: 5:00–10:00 PM (minimum 1 hour) · Night differential: 10:00 PM–6:00 AM.</p>${extension ? `<p class="card-sub">Offsite continuation: ${h(formatTime(extension.continuedAt))}. ${outPunch ? `OT ${h(formatMinutes(extra.overtimeEligible ? extra.overtimeCandidateMinutes : 0))} (${h(extra.overtimeEligible ? extension.overtimeDecision.toLowerCase() : 'below 1 hour')}) · Night ${h(formatMinutes(extra.nightCandidateMinutes))} (${h(extra.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}).` : 'Time Out with selfie and GPS when finished. The shift closes automatically at 6:00 AM if still open.'}</p>` : ''}<div class="card-actions">${action ? `${extension ? '' : `<button class="btn" data-action="capture-onsite" data-slot="${action}">${action === 'IN' ? 'Time In' : 'Time Out'} onsite</button>`}<button class="btn secondary" data-action="capture-offsite" data-slot="${action}">${action === 'IN' ? 'Time In' : 'Time Out'} offsite</button>${canContinue ? '<button class="btn ghost" data-action="continue-offsite">Continue overtime offsite →</button>' : ''}` : `<button class="btn secondary" data-nav="history">View logs</button>`}</div></section>
+    <div class="grid"><section class="card wide employee-attendance-card"><div class="employee-attendance-head"><div class="card-title"><span class="symbol">◷</span> ${state.employeeData.openShift ? 'OVERNIGHT SHIFT' : "TODAY'S ATTENDANCE"}</div><button class="attendance-view-button" data-nav="history" aria-label="View attendance history" title="View attendance history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.8"></circle></svg></button></div><div class="pill ${statusOf(inPunch,outPunch) === 'Present' ? '' : 'pending'}">${h(holiday && !inPunch && !outPunch ? `Holiday · ${holiday.name}` : statusOf(inPunch,outPunch))}</div><p class="card-sub">Work date: ${h(prettyDate(workDate))}</p><div class="punch-line"><span>Time In</span><strong class="${inPunch ? '' : 'missing'}">${h(formatTime(inPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(inPunch)} ${h(locationText(inPunch))} ${inPunch ? mapLink(inPunch, 'Open Time In map ↗') : ''}</div><div class="punch-line"><span>Time Out</span><strong class="${outPunch ? '' : 'missing'}">${h(formatTime(outPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(outPunch)} ${h(locationText(outPunch))} ${outPunch ? mapLink(outPunch, 'Open Time Out map ↗') : ''}</div>${extension ? `<p class="card-sub">Offsite continuation: ${h(formatTime(extension.continuedAt))}. ${outPunch ? `OT ${h(formatMinutes(extra.overtimeEligible ? extra.overtimeCandidateMinutes : 0))} (${h(extra.overtimeEligible ? extension.overtimeDecision.toLowerCase() : 'below 1 hour')}) · Differential ${h(formatMinutes(extra.nightCandidateMinutes))} (${h(extra.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}).` : 'Time Out with selfie and GPS when finished. The shift closes automatically at 6:00 AM if still open.'}</p>` : ''}${action ? `<div class="card-actions"><button class="btn auto-punch-button" data-action="capture-auto" data-slot="${action}"><span aria-hidden="true">◎</span> ${action === 'IN' ? 'Time In' : 'Time Out'}</button>${canContinue ? '<button class="btn ghost" data-action="continue-offsite">Continue overtime offsite →</button>' : ''}</div>` : ''}${action ? `<div class="punch-location-status ready"><span>GPS automatically marks this punch as <strong>Onsite</strong> inside the site pin or <strong>Offsite</strong> outside it.</span></div>` : ''}</section>
     <section class="card"><div class="card-title"><span class="symbol">▤</span> CURRENT CUTOFF</div><div class="card-sub">${h(dateSpan(current))}</div><div class="metric-row"><div class="metric-cell"><div class="metric green">${days.size}</div><span class="label">Days with Time In</span></div><div class="metric-cell"><div class="metric amber">${late}</div><span class="label">Late minutes</span></div></div><p class="card-sub">Undertime: ${h(formatMinutes(undertime))}</p><button class="link-button" data-nav="history">View cutoff details ›</button></section>
-    <section class="card"><div class="card-title"><span class="symbol">◌</span> KAMUSTA KA?</div><p class="card-sub">See your previous attendance, verification results, and past payroll cutoffs.</p><div class="card-actions"><button class="btn secondary" data-nav="history">Previous attendance →</button></div></section>${renderHolidayCard()}</div>
-    <div style="height:16px"></div>${extension && !outPunch ? `<div class="notice">Offsite work is still running. Estimated overtime: <strong>${h(formatMinutes(extra.overtimeCandidateMinutes))}</strong>; estimated night differential: <strong>${h(formatMinutes(extra.nightCandidateMinutes))}</strong>. These are provisional until Time Out or the 6:00 AM auto-close, then require admin approval.</div>` : ''}<div class="notice">${config().configured ? `Onsite Time In is available only inside <strong>${h(config().siteName)}</strong> (${h(config().radiusM)} m radius).` : 'Admin needs to set the site GPS pin before onsite punches can be used.'} Selfie and device location are required for both onsite and offsite punches.</div>`;
+    ${recentAttendanceFolders(punches)}${renderHolidayCard()}</div>
+    <div style="height:16px"></div>${extension && !outPunch ? `<div class="notice">Offsite work is still running. Estimated overtime: <strong>${h(formatMinutes(extra.overtimeCandidateMinutes))}</strong>; estimated Differential: <strong>${h(formatMinutes(extra.nightCandidateMinutes))}</strong>. These are provisional until Time Out or the 6:00 AM auto-close, then require admin approval.</div>` : ''}<div class="notice">Your device GPS automatically determines Onsite or Offsite. A compressed selfie and saved map location are required for every employee punch.</div>`;
+}
+
+function employeeAttendanceDayCard(date, pair) {
+  const holiday = holidayFor(date, config().holidays);
+  const status = holiday && !pair.IN && !pair.OUT ? `Holiday · ${holiday.name}` : statusOf(pair.IN, pair.OUT);
+  const mins = minutesStatus(pair.IN, pair.OUT, state.session.user, date);
+  const extension = state.employeeData.extensions.find(item => item.workDate === date);
+  const hours = runningBreakdown(date, pair.IN, pair.OUT, extension);
+  const overtime = extension && pair.OUT && hours.overtimeEligible ? hours.overtimeCandidateMinutes : 0;
+  const verification = pair.IN?.verification === 'REJECTED' || pair.OUT?.verification === 'REJECTED' ? 'rejected'
+    : pair.IN?.verification === 'APPROVED' && pair.OUT?.verification === 'APPROVED' ? 'approved' : 'pending';
+  return `<article class="attendance-day-card"><div class="attendance-day-head"><div><span class="attendance-day-label">WORKDAY</span><h3>${h(prettyDate(date))}</h3></div><span class="attendance-state ${verification}">${h(status)}</span></div><div class="attendance-time-grid"><div><span>TIME IN</span><strong>${h(formatShiftTime(pair.IN?.timeUtc, date))}</strong><small>${h(punchSource(pair.IN))}</small>${pair.IN ? mapLink(pair.IN, 'View map ↗') : ''}</div><div><span>TIME OUT</span><strong>${h(formatShiftTime(pair.OUT?.timeUtc, date))}</strong><small>${h(punchSource(pair.OUT))}</small>${pair.OUT ? mapLink(pair.OUT, 'View map ↗') : ''}</div></div><div class="attendance-hour-grid"><div><span>Regular</span><strong>${h(formatMinutes(hours.regularMinutes))}</strong></div><div><span>Undertime</span><strong>${h(formatMinutes(hours.undertimeMinutes))}</strong></div><div><span>OT</span><strong>${h(formatMinutes(overtime))}</strong></div><div class="differential"><span>Differential</span><strong>${h(formatMinutes(hours.nightCandidateMinutes))}</strong></div></div>${mins.late ? `<div class="attendance-alert">Late balance · ${h(formatMinutes(mins.late))}</div>` : ''}${extension ? `<p class="attendance-review">OT ${h(extension.overtimeDecision.toLowerCase())} · Differential ${h(hours.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}</p>` : ''}${pair.IN?.verification === 'REJECTED' ? `<p class="attendance-rejected">Time In rejected: ${h(pair.IN.rejectionReason)}</p>` : ''}${pair.OUT?.verification === 'REJECTED' ? `<p class="attendance-rejected">Time Out rejected: ${h(pair.OUT.rejectionReason)}</p>` : ''}</article>`;
 }
 
 function renderHistory() {
@@ -312,46 +466,51 @@ function renderHistory() {
     if (holiday.date >= range.start && holiday.date <= range.end && !grouped.has(holiday.date)) grouped.set(holiday.date, {});
   }
   const sorted = [...grouped.entries()].sort((a, b) => b[0].localeCompare(a[0]));
-  return `<div class="section-head"><div><p class="eyebrow">MY RECORDS</p><h1 class="section-title">Attendance history</h1><p>Actual punch times stay visible while extra hours await admin review.</p></div></div><div class="card"><div class="section-head"><strong>Payroll cutoff</strong><div><button class="btn small secondary" data-action="cutoff-prev" aria-label="Previous cutoff">‹</button> <button class="btn small secondary" data-action="cutoff-next" aria-label="Next cutoff">›</button></div></div><strong style="color:var(--teal)">${h(dateSpan(range))}</strong><form id="history-form" class="filters" style="margin-top:16px"><div class="field"><label>From</label><input type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label>To</label><input type="date" name="to" value="${h(range.end)}" required></div><button class="btn secondary" type="submit">Show</button></form></div><div style="height:16px"></div>${sorted.length ? `<div class="list">${sorted.map(([date, pair]) => {
-    const holiday = holidayFor(date, config().holidays);
-    const status = holiday && !pair.IN && !pair.OUT ? `Holiday · ${holiday.name}` : statusOf(pair.IN, pair.OUT);
-    const mins = minutesStatus(pair.IN, pair.OUT, state.session.user, date);
-    const extension = state.employeeData.extensions.find(item => item.workDate === date);
-    const hours = runningBreakdown(date, pair.IN, pair.OUT, extension);
-    const premiumText = extension && pair.OUT
-      ? hours.overtimeEligible
-        ? `OT ${formatMinutes(hours.overtimeCandidateMinutes)} (${extension.overtimeDecision.toLowerCase()}) · Night ${formatMinutes(hours.nightCandidateMinutes)} (${hours.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none'})`
-        : 'Overtime below 1 hour · regular time only'
-      : extension ? `Offsite work in progress · estimated OT ${formatMinutes(hours.overtimeCandidateMinutes)} · night ${formatMinutes(hours.nightCandidateMinutes)}` : 'No overtime request';
-    return `<div class="list-item"><div><strong>${h(prettyDate(date))}</strong><p>${h(status)} · Late ${mins.late} min · Undertime ${h(formatMinutes(hours.undertimeMinutes))}</p><p>In: ${h(formatShiftTime(pair.IN?.timeUtc, date))} (${h(punchSource(pair.IN))}) · Out: ${h(formatShiftTime(pair.OUT?.timeUtc, date))} (${h(punchSource(pair.OUT))})</p><p>Regular ${h(formatMinutes(hours.regularMinutes))} · ${h(premiumText)}</p><p>${pair.IN?.verification === 'REJECTED' ? `Time In rejected: ${h(pair.IN.rejectionReason)}` : ''} ${pair.OUT?.verification === 'REJECTED' ? `Time Out rejected: ${h(pair.OUT.rejectionReason)}` : ''}</p></div><div class="right">${holiday && !pair.IN && !pair.OUT ? '<span class="pill">No work</span>' : badge(pair.IN || pair.OUT)}</div></div>`;
-  }).join('')}</div>` : '<div class="empty">No attendance records in this date range.</div>'}`;
+  return `<div class="section-head"><div><p class="eyebrow">MY RECORDS</p><h1 class="section-title">Attendance history</h1><p>Review each workday, recorded locations, regular hours, OT, and Differential.</p></div></div><div class="card attendance-range-card"><div class="section-head"><div><span class="tiny-label">PAYROLL CUTOFF</span><strong>${h(dateSpan(range))}</strong></div><div><button class="btn small secondary" data-action="cutoff-prev" aria-label="Previous cutoff">‹</button> <button class="btn small secondary" data-action="cutoff-next" aria-label="Next cutoff">›</button></div></div><form id="history-form" class="filters"><div class="field"><label>From</label><input type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label>To</label><input type="date" name="to" value="${h(range.end)}" required></div><button class="btn secondary" type="submit">Show records</button></form></div>${sorted.length ? `<div class="attendance-history-grid">${sorted.map(([date, pair]) => employeeAttendanceDayCard(date, pair)).join('')}</div>` : '<div class="empty attendance-history-empty">No attendance records in this date range.</div>'}`;
 }
 
 function renderCapture() {
+  const inPunch = getTodayPunch('IN'), outPunch = getTodayPunch('OUT');
+  if (inPunch && outPunch) {
+    state.capture = null;
+    const hours = premiumBreakdown(activeWorkDate(), inPunch, outPunch, activeExtension());
+    return `<div class="section-head"><div><p class="eyebrow">TIME CLOCK</p><h1 class="section-title">Attendance complete</h1><p>${h(prettyDate(activeWorkDate()))}</p></div></div><section class="card clock-complete"><div class="clock-complete-mark" aria-hidden="true">✓</div><span class="pill">Completed</span><h2>Your attendance is already recorded</h2><p>Time In and Time Out for this workday are complete. Another punch cannot be submitted.</p><div class="clock-complete-times"><div><span>TIME IN</span><strong>${h(formatTime(inPunch.timeUtc))}</strong><small>${h(punchSource(inPunch))}</small>${mapLink(inPunch, 'View Time In map ↗')}</div><div><span>TIME OUT</span><strong>${h(formatTime(outPunch.timeUtc))}</strong><small>${h(punchSource(outPunch))}</small>${mapLink(outPunch, 'View Time Out map ↗')}</div></div><div class="clock-complete-summary"><span>Regular hours</span><strong>${h(formatMinutes(hours.regularMinutes))}</strong></div><div class="card-actions"><button class="btn secondary" data-nav="home">Back to home</button><button class="btn ghost" data-nav="history">View attendance records</button></div></section>`;
+  }
   const holiday = holidayFor(activeWorkDate(), config().holidays);
   if (holiday) return `<div class="section-head"><div><p class="eyebrow">TIME CLOCK</p><h1 class="section-title">No work today</h1><p>${h(prettyDate(today()))} · ${h(holiday.name)}</p></div></div><div class="notice">This date is marked as a holiday. Ask an administrator to record exceptional work.</div><button class="btn secondary" data-nav="home">Back to home</button>`;
   const extension = activeExtension();
-  const c = state.capture || { method: extension ? 'OFFSITE' : 'ONSITE', slot: getTodayPunch('IN') ? 'OUT' : 'IN',
+  const c = state.capture || { method: 'OFFSITE', slot: getTodayPunch('IN') ? 'OUT' : 'IN',
     location: null, selfie: null, note: extension ? (getTodayPunch('IN')?.note || '') : '' };
   state.capture = c;
   const site = config();
   const distance = c.location && site.configured ? Math.round(haversine(c.location.latitude, c.location.longitude, site.siteLat, site.siteLng)) : null;
-  const allowed = c.method !== 'ONSITE' || (distance !== null && distance <= site.radiusM && c.location?.accuracyM <= site.maxAccuracyM);
-  return `<div class="section-head"><div><p class="eyebrow">TIME CLOCK</p><h1 class="section-title">${c.slot === 'IN' ? 'Time In' : 'Time Out'}</h1><p>${h(prettyDate(activeWorkDate()))} · ${h(c.method === 'ONSITE' ? 'Onsite' : 'Offsite / field')}</p></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">◎</span> ${c.method === 'ONSITE' ? 'ONSITE' : 'OFFSITE'} ${c.slot === 'IN' ? 'TIME IN' : 'TIME OUT'}</div>${extension && c.slot === 'OUT' ? '<p class="notice">Offsite overtime continuation is active. Finish with offsite Time Out, selfie, and GPS. Night hours after 10:00 PM stop at 6:00 AM.</p>' : `<div class="field"><label>Work location type</label><select id="capture-method"><option value="ONSITE" ${c.method === 'ONSITE' ? 'selected' : ''}>Onsite — ${h(site.siteName)}</option><option value="OFFSITE" ${c.method === 'OFFSITE' ? 'selected' : ''}>Offsite / field</option></select></div>`}${c.method === 'OFFSITE' ? `<div class="field"><label for="capture-note">Field location / assignment</label><input id="capture-note" maxlength="300" placeholder="e.g. Client visit at Quezon City" value="${h(c.note)}" required></div>` : ''}
-    <div class="card-title"><span class="symbol">◉</span> DEVICE LOCATION</div><div class="map-card">${c.location ? `<strong>${Number(c.location.latitude).toFixed(6)}, ${Number(c.location.longitude).toFixed(6)}</strong><small>Accuracy ±${Math.round(c.location.accuracyM)} m${distance !== null ? ` · ${distance} m from site pin` : ''}</small>` : '<span class="muted">Location not captured yet.</span>'}</div><div class="card-actions"><button class="btn secondary" data-action="location">${c.location ? 'Refresh location' : 'Get my location'}</button></div>${c.method === 'ONSITE' && c.location && !allowed ? `<p class="notice warn">You are outside the site radius or GPS accuracy is too low. Use Offsite DTR or retry location.</p>` : ''}
-    <div class="divider"></div><button class="btn block" data-action="submit-punch" ${!c.location || !c.selfie || !allowed || (c.method === 'OFFSITE' && c.note.trim().length < 3) ? 'disabled' : ''}>Confirm ${c.slot === 'IN' ? 'Time In' : 'Time Out'}</button><p class="tiny-label">Official time is set by the server when the punch is saved. A success receipt appears only after confirmation.</p></div>
-    <div class="card"><div class="card-title"><span class="symbol">▣</span> SELFIE PROOF</div><div class="camera-box" id="camera-box">${c.selfie ? `<img src="${c.selfie}" alt="Captured selfie preview">` : '<div class="camera-placeholder"><div class="symbol">◉</div><p>Take a clear selfie for this punch.</p></div>'}</div><div class="capture-actions"><button class="btn secondary" data-action="camera-start">Open camera</button><button class="btn secondary hidden" id="camera-snap" data-action="camera-snap">Take selfie</button><label class="btn ghost" for="selfie-file">Device camera fallback</label><input id="selfie-file" type="file" accept="image/*" capture="user" class="hidden"></div><p class="tiny-label">Selfie and GPS are required for both onsite and offsite employee punches. Admin-created attendance is clearly marked separately.</p></div></div>`;
+  c.method = detectedPunchMethod(c.location, extension);
+  const accurate = c.location && c.location.accuracyM <= site.maxAccuracyM;
+  return `<div class="section-head"><div><p class="eyebrow">${c.method === 'ONSITE' ? 'ONSITE DETECTED' : 'OFFSITE DETECTED'}</p><h1 class="section-title">${c.slot === 'IN' ? 'Time In' : 'Time Out'}</h1></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">◎</span> AUTOMATIC GPS CHECK</div>${extension && c.slot === 'OUT' ? '<p class="notice">Offsite overtime continuation is active. Finish with a selfie and GPS.</p>' : ''}${c.method === 'OFFSITE' ? `<div class="field"><label for="capture-note">Offsite assignment note (optional)</label><input id="capture-note" maxlength="300" placeholder="e.g. Client visit at Quezon City" value="${h(c.note)}"></div>` : ''}
+    <div class="map-card">${c.location ? `<strong>${c.method === 'ONSITE' ? h(site.siteName) : 'Offsite / field location'}</strong><small>GPS accuracy ±${Math.round(c.location.accuracyM)} m${distance !== null ? ` · ${distance} m from site pin` : ''}</small>${mapLink(c.location)}` : '<span class="muted">Capturing device location…</span>'}</div>${c.location && !accurate ? `<div class="notice warn">GPS accuracy is ±${Math.round(c.location.accuracyM)} m. Move near a window or outdoors, then <button class="link-button" data-action="location">retry GPS</button>.</div>` : ''}
+    <div class="divider"></div><button class="btn block" data-action="submit-punch" ${!c.location || !c.selfie || !accurate ? 'disabled' : ''}>Upload &amp; Record ${c.slot === 'IN' ? 'Time In' : 'Time Out'}</button><p class="tiny-label">Onsite or Offsite is determined automatically from the saved site pin. Your compressed selfie and GPS map location are uploaded together.</p></div>
+    <div class="card"><div class="card-title"><span class="symbol">▣</span> SELFIE PROOF</div><div class="camera-box" id="camera-box">${c.selfie ? `<img src="${c.selfie}" alt="Captured selfie preview">` : '<div class="camera-placeholder"><div class="symbol">◉</div><p>Take a clear selfie for this punch.</p></div>'}</div><div class="capture-actions"><button class="btn secondary" data-action="camera-start">Open camera</button><button class="btn secondary hidden" id="camera-snap" data-action="camera-snap">Take selfie</button><label class="btn ghost" for="selfie-file">Device camera fallback</label><input id="selfie-file" type="file" accept="image/*" capture="user" class="hidden"></div><p class="tiny-label">Selfie and GPS are required for both onsite and offsite employee punches.${c.selfieBytes ? ` Compressed image: ${h(Math.max(1, Math.round(c.selfieBytes / 1024)))} KB.` : ''}</p></div></div>`;
 }
 
 function renderProfile() {
   const user = state.session.user;
-  return `<div class="section-head"><div><p class="eyebrow">ACCOUNT</p><h1 class="section-title">Profile & security</h1></div></div>
+  if (user.role !== 'admin') return `<div class="section-head"><div><p class="eyebrow">ACCOUNT</p><h1 class="section-title">Profile & security</h1></div></div>
     <div class="split"><div class="card"><div class="card-title"><span class="symbol">◉</span> MY ACCOUNT</div>
-      <div class="profile-identity"><div class="profile-avatar">${avatarMarkup(user)}</div><p><strong>${h(user.name)}</strong><br><span class="muted">${h(user.email)} · ${h(user.role)}</span></p></div>
-      ${user.role === 'employee' ? `<p class="card-sub">Schedule: ${h(user.scheduleStart)}–${h(user.scheduleEnd)} · Late starts immediately after 8:00 AM.</p>` : ''}
+      <div class="profile-identity"><div class="profile-avatar">${avatarMarkup(user)}</div><p><strong>${h(user.name)}</strong><br><span class="muted">${h(user.mobile || user.email)} · ${h(user.role)}</span></p></div>
+      <p class="card-sub">Schedule: ${h(formatClockText(user.scheduleStart))}–${h(formatClockText(user.scheduleEnd))} · Complete 8 paid hours; recovered time removes lateness.</p>
       <div class="card-actions"><button class="btn secondary" data-action="logout">Sign out</button>${state.installPrompt ? '<button class="btn ghost" data-action="install">Install PWA</button>' : ''}</div></div>
-      <div class="card"><div class="card-title"><span class="symbol">◇</span> CHANGE PASSWORD</div><form id="password-form"><div class="field"><label>Current password</label><input name="currentPassword" type="password" autocomplete="current-password" required></div><div class="field"><label>New password (8+ characters)</label><input name="newPassword" type="password" minlength="8" autocomplete="new-password" required></div><button class="btn" type="submit">Update password</button></form></div></div>
-    ${user.role === 'admin' ? `<div class="split settings-extra">${renderBrandingForm()}<div class="card"><div class="card-title"><span class="symbol">▣</span> PROFILE PICTURE</div><p class="card-sub">Update the picture shown on your admin profile and header.</p><form id="profile-photo-form"><div class="field"><label for="profile-photo">Replace picture</label><input id="profile-photo" type="file" accept="image/png,image/jpeg,image/webp"></div>${user.profileImageUrl ? '<label class="check-row"><input type="checkbox" name="removePhoto"> Remove current picture</label>' : ''}<button class="btn secondary" type="submit">Save picture</button></form></div></div><div class="grid settings-extra"><div class="card wide danger-card"><div class="card-title"><span class="symbol">⌫</span> DELETE ADMIN ACCOUNT</div><p class="card-sub">This permanently removes your admin login and profile picture. Attendance, employee accounts, and audit records remain. If no other admin exists, anyone who opens the app can create the next admin account and access those records.</p><form id="delete-account-form"><div class="field"><label>Current password</label><input name="password" type="password" autocomplete="current-password" required></div><div class="field"><label>Type DELETE to confirm</label><input name="confirmation" type="text" autocomplete="off" pattern="DELETE" required></div><button class="btn danger" type="submit">Delete my admin account</button></form></div></div>` : ''}`;
+      <div class="card"><div class="card-title"><span class="symbol">◇</span> CHANGE PASSWORD</div><form id="password-form"><div class="field"><label>Current password</label><input name="currentPassword" type="password" autocomplete="current-password" required></div><div class="field"><label>New password (8+ characters)</label><input name="newPassword" type="password" minlength="8" autocomplete="new-password" required></div><button class="btn" type="submit">Update password</button></form></div></div>`;
+
+  const s = config();
+  return `<div class="section-head"><div><p class="eyebrow">ACCOUNT</p><h1 class="section-title">Profile & settings</h1><p>Manage your account, company app, work site, and payroll schedule.</p></div></div>
+    <div class="profile-card card"><div class="profile-summary"><div class="profile-avatar profile-avatar-large">${avatarMarkup(user)}</div><div class="profile-copy"><span class="pill admin">Administrator</span><h2>${h(user.name)}</h2><p>${h(user.email)}</p></div></div>
+      <div class="profile-actions"><button class="btn" data-action="edit-profile"><span aria-hidden="true">✎</span> Edit Profile</button><button class="btn ghost" data-action="logout">Sign out</button>${state.installPrompt ? '<button class="btn ghost" data-action="install">Install PWA</button>' : ''}</div></div>
+    <div class="settings-list settings-extra">
+      <div class="settings-row"><div class="settings-icon">${brandIconMarkup()}</div><div class="settings-copy"><strong>App appearance</strong><p>${h(state.branding.appName)} · Update the app name and logo.</p></div><button class="btn secondary small" data-action="update-app">Update App</button></div>
+      <div class="settings-row"><div class="settings-icon"><span class="symbol">◎</span></div><div class="settings-copy"><strong>Manage site</strong><p>${s.configured ? `${h(s.siteName)} · ${s.radiusM} m allowed radius` : 'Site GPS location has not been configured.'}</p></div><button class="btn secondary small" data-action="site-settings">Site GPS</button></div>
+      <div class="settings-row"><div class="settings-icon"><span class="symbol">▥</span></div><div class="settings-copy"><strong>Payroll cutoff</strong><p>${h(dateSpan(currentRange()))} · Starts every ${s.cutoffDays[0]} and ${s.cutoffDays[1]}</p></div><button class="btn secondary small" data-action="payroll-settings">Set Cutoff</button></div>
+      <div class="settings-row"><div class="settings-icon"><span class="symbol">▦</span></div><div class="settings-copy"><strong>Holidays & no-work dates</strong><p>Manage company holidays and exceptional work dates.</p></div><button class="btn secondary small" data-nav="settings">Manage</button></div>
+    </div>`;
 }
 
 function renderAudit() {
@@ -370,78 +529,106 @@ function renderAdminHome() {
   }).length;
   const pending = rows.filter(p => p.verification === 'PENDING').length + pendingPremium;
   const incomplete = new Set(todayRows.filter(p => p.slot === 'IN' && !todayRows.some(q => q.userId === p.userId && q.slot === 'OUT')).map(p => p.userId)).size;
-  const recent = rows.slice(0, 8);
-  return `<div class="hero"><p class="eyebrow">ADMIN DASHBOARD · ${h(prettyDate(today()))}</p><h1>Attendance overview</h1><p>Review field proofs and resolve missing records before payroll cutoff.</p></div><div class="mini-grid"><div class="stat-card"><div class="num">${employees.filter(e => e.active).length}</div><div class="label">Active employees</div></div><div class="stat-card"><div class="num">${present}</div><div class="label">Timed in today</div></div><div class="stat-card"><div class="num">${pending}</div><div class="label">Pending reviews</div></div><div class="stat-card"><div class="num">${incomplete}</div><div class="label">Incomplete today</div></div></div><div style="height:17px"></div><div class="grid"><div class="card"><div class="card-title"><span class="symbol">◎</span> SITE STATUS</div><p>${config().configured ? `<strong>${h(config().siteName)}</strong><br><span class="card-sub">${config().siteLat}, ${config().siteLng} · ${config().radiusM} m radius</span>` : '<span class="pill pending">Site GPS not configured</span>'}</p><button class="link-button" data-nav="settings">Manage site & cutoff ›</button></div><div class="card"><div class="card-title"><span class="symbol">▥</span> CURRENT CUTOFF</div><strong>${h(dateSpan(currentRange()))}</strong><p class="card-sub">Review exceptions and prepare printable payroll summary.</p><button class="link-button" data-nav="report">Open report ›</button></div></div><div style="height:17px"></div><div class="grid">${renderHolidayCard()}</div><div style="height:23px"></div><div class="section-head"><h2 class="section-title">Recent punches</h2><button class="btn small secondary" data-nav="records">See all</button></div>${recent.length ? `<div class="list">${recent.map(recordItem).join('')}</div>` : '<div class="empty">No attendance punches in this cutoff yet.</div>'}`;
+  const recent = recentEmployeeFolders(rows);
+  return `<div class="hero"><p class="eyebrow">ADMIN DASHBOARD · ${h(prettyDate(today()))}</p><h1>Attendance overview</h1><p>Review field proofs and resolve missing records before payroll cutoff.</p></div><div class="mini-grid"><div class="stat-card"><div class="num">${employees.filter(e => e.active).length}</div><div class="label">Active employees</div></div><div class="stat-card"><div class="num">${present}</div><div class="label">Timed in today</div></div><div class="stat-card"><div class="num">${pending}</div><div class="label">Pending reviews</div></div><div class="stat-card"><div class="num">${incomplete}</div><div class="label">Incomplete today</div></div></div><div style="height:17px"></div><div class="grid"><div class="card wide"><div class="card-title"><span class="symbol">▥</span> CURRENT CUTOFF</div><strong>${h(dateSpan(currentRange()))}</strong><p class="card-sub">Review exceptions and prepare printable payroll summary.</p><button class="link-button" data-nav="report">Open report ›</button></div></div><div style="height:17px"></div><div class="grid">${renderHolidayCard()}</div><div style="height:23px"></div><div class="section-head"><div><h2 class="section-title">Recent punches</h2><p>Click an employee folder to view the latest proof.</p></div><button class="btn small secondary" data-nav="records">See all</button></div>${recent.length ? `<div class="punch-folders">${recent.map(recentPunchFolder).join('')}</div>` : '<div class="empty">No attendance punches in this cutoff yet.</div>'}`;
 }
 
 function renderBrandingForm() {
-  return `<div class="card"><div class="card-title"><span class="symbol">◈</span> APP NAME & LOGO</div><p class="card-sub">The name and logo appear on the sign-in screen, header, report, browser tab, and PWA install details.</p>
-    <form id="branding-form"><div class="field"><label for="app-brand-name">App name</label><input id="app-brand-name" name="appName" minlength="2" maxlength="60" value="${h(state.branding.appName)}" required></div><div class="brand-preview">${brandMarkup()}</div><div class="field"><label for="app-brand-logo">Replace logo (PNG, JPG, or WebP)</label><input id="app-brand-logo" name="logoFile" type="file" accept="image/png,image/jpeg,image/webp"></div><p class="tiny-label">The image is fitted into square 192 px and 512 px PNG icons. Leave this blank to keep the current logo.</p>${state.branding.logo192Url ? '<label class="check-row"><input name="removeLogo" type="checkbox"> Remove current logo and use the default icon</label>' : ''}<button class="btn block" type="submit">Save app branding</button></form></div>`;
+  return `<form id="branding-form"><div class="field"><label for="app-brand-name">App name</label><input id="app-brand-name" name="appName" minlength="2" maxlength="60" value="${h(state.branding.appName)}" required></div><div class="brand-preview" id="brand-preview">${brandMarkup()}</div><div class="field"><label for="app-brand-logo">New logo</label><input id="app-brand-logo" name="logoFile" type="file" accept="image/png,image/jpeg,image/webp"></div><p class="tiny-label">PNG, JPG, or WebP up to 5 MB. Leave blank to keep the current logo.</p>${state.branding.logo192Url ? '<label class="check-row"><input name="removeLogo" type="checkbox"> Use the default icon instead</label>' : ''}<div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn" type="submit">Save App</button></div></form>`;
 }
 
-function recordItem(p) {
-  return `<div class="list-item"><div><strong>${h(p.employeeName)}</strong><p>${h(prettyDate(p.workDate))} · ${h(p.slot === 'IN' ? 'Time In' : 'Time Out')} ${h(formatShiftTime(p.timeUtc, p.workDate))} · ${h(punchSource(p))}</p></div><div class="right">${badge(p)}<br><button class="link-button" data-action="record-detail" data-id="${p.id}">View proof ›</button></div></div>`;
+function recentEmployeeFolders(punches, limit = 8) {
+  const employees = new Map();
+  for (const punch of punches) {
+    const current = employees.get(punch.userId);
+    if (!current || punch.timeUtc > current.latest.timeUtc) employees.set(punch.userId, { latest: punch });
+  }
+  return [...employees.values()].sort((a, b) => b.latest.timeUtc.localeCompare(a.latest.timeUtc)).slice(0, limit).map(item => {
+    const dayPunches = punches.filter(p => p.userId === item.latest.userId && p.workDate === item.latest.workDate);
+    return { ...item, inPunch: dayPunches.find(p => p.slot === 'IN'), outPunch: dayPunches.find(p => p.slot === 'OUT') };
+  });
+}
+function recentPunchFolder({ latest, inPunch, outPunch }) {
+  const status = latest.slot === 'OUT' ? 'TIME OUT' : 'TIME IN';
+  return `<button type="button" class="punch-folder" data-action="record-detail" data-id="${latest.id}" aria-label="View latest proof for ${h(latest.employeeName)}"><span class="folder-tab" aria-hidden="true"></span><span class="folder-main"><span class="folder-person"><span class="folder-avatar">${h(latest.employeeName.split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase())}</span><span><strong>${h(latest.employeeName)}</strong><small>${h(prettyDate(latest.workDate))} · ${h(punchSource(latest))}</small></span></span><span class="folder-status ${latest.slot === 'OUT' ? 'out' : 'in'}"><small>LATEST</small><strong>${status}</strong><span>${h(formatShiftTime(latest.timeUtc, latest.workDate))}</span></span></span><span class="folder-times"><span><small>Time In</small><strong>${h(formatShiftTime(inPunch?.timeUtc, latest.workDate))}</strong></span><span><small>Time Out</small><strong>${h(formatShiftTime(outPunch?.timeUtc, latest.workDate))}</strong></span><span class="folder-open">Open proof <span aria-hidden="true">›</span></span></span></button>`;
+}
+function dailyRecordItems(punches) {
+  const days = new Map();
+  for (const punch of punches) {
+    const key = `${punch.userId}|${punch.workDate}`;
+    if (!days.has(key)) days.set(key, { employeeName: punch.employeeName, workDate: punch.workDate, punches: [] });
+    days.get(key).punches.push(punch);
+  }
+  return [...days.values()].map(day => {
+    const inPunch = day.punches.find(p => p.slot === 'IN'), outPunch = day.punches.find(p => p.slot === 'OUT');
+    const payrollReady = isPayrollReady(inPunch, outPunch);
+    const rejected = [inPunch, outPunch].some(p => p?.verification === 'REJECTED');
+    const status = payrollReady ? 'APPROVED FOR PAYROLL' : rejected ? 'NEEDS CORRECTION' : inPunch && outPunch ? 'READY FOR REVIEW' : 'INCOMPLETE';
+    const id = inPunch?.id || outPunch?.id;
+    return `<button type="button" class="list-item record-item-button" data-action="record-detail" data-id="${h(id)}" aria-label="Review daily attendance for ${h(day.employeeName)} on ${h(prettyDate(day.workDate))}"><div><strong>${h(day.employeeName)}</strong><p>${h(prettyDate(day.workDate))} · In ${h(formatShiftTime(inPunch?.timeUtc, day.workDate))} · Out ${h(formatShiftTime(outPunch?.timeUtc, day.workDate))}</p></div><div class="right"><span class="record-action ${payrollReady ? 'out' : 'in'}">${status}</span></div></button>`;
+  }).join('');
+}
+function punchProofRow(p, slot) {
+  const label = slot === 'IN' ? 'Time In' : 'Time Out';
+  if (!p) return `<section class="proof-row missing-proof"><div class="proof-row-head"><div><span class="proof-step">${slot === 'IN' ? '01' : '02'}</span><h3>${label}</h3></div><span class="pill pending">Not recorded</span></div></section>`;
+  const location = p.latitude == null || p.longitude == null
+    ? `<div class="proof-location"><strong>No device location</strong><small>${p.method === 'ADMIN' ? 'Attendance created by admin' : 'Automatically generated record'}</small></div>`
+    : `<div class="proof-location"><strong>${Number(p.latitude).toFixed(6)}, ${Number(p.longitude).toFixed(6)}</strong><small>Accuracy ±${Math.round(p.accuracyM)} m · ${p.distanceM == null ? 'Field location' : `${Math.round(p.distanceM)} m from site pin`}</small>${mapLink(p)}</div>`;
+  const photo = p.hasSelfie
+    ? `<div class="proof-photo"><p id="proof-loading-${h(p.id)}">Loading selfie…</p><img class="hidden" id="proof-selfie-${h(p.id)}" alt="${label} selfie proof for ${h(p.employeeName)}"></div>`
+    : `<div class="proof-photo proof-photo-empty"><span>No selfie</span></div>`;
+  return `<section class="proof-row"><div class="proof-row-head"><div><span class="proof-step">${slot === 'IN' ? '01' : '02'}</span><h3>${label}</h3></div>${badge(p)}</div><div class="proof-body"><div class="proof-data"><div class="proof-time"><span>SERVER PUNCH TIME</span><strong>${h(formatShiftTime(p.timeUtc, p.workDate))}</strong><small>${h(punchSource(p))}</small></div>${location}${p.note ? `<div class="proof-note"><span>NOTE</span><p>${h(p.note)}</p></div>` : ''}${p.verification === 'REJECTED' ? `<div class="notice error">Rejected: ${h(p.rejectionReason)}</div>` : ''}${['ONSITE', 'OFFSITE'].includes(p.method) && p.verification !== 'APPROVED' ? `<div class="card-actions"><button class="btn small danger" data-action="verify-reject" data-id="${p.id}">Reject ${label}</button></div>` : ''}</div>${photo}</div></section>`;
 }
 function renderPremiumQueue() {
   const extensions = state.adminData.extensions || [];
-  return `<section class="card premium-queue"><div class="card-title"><span class="symbol">◷</span> OVERTIME & NIGHT REVIEW</div><p class="card-sub">Review offsite proof first. A full hour between 5:00 and 10:00 PM qualifies for overtime. Night differential from 10:00 PM needs its own approval.</p>${extensions.length ? `<div class="list">${extensions.map(extension => {
+  return `<section class="card premium-queue"><div class="card-title"><span class="symbol">◷</span> OVERTIME & DIFFERENTIAL REVIEW</div><p class="card-sub">Review offsite proof first. Overtime begins after 5:00 PM only when 8 regular hours are complete and needs at least 1 full hour. Work between 10:00 PM and 6:00 AM is tracked separately as Differential.</p>${extensions.length ? `<div class="list">${extensions.map(extension => {
     const pair = state.adminData.punches.filter(p => p.userId === extension.userId && p.workDate === extension.workDate);
     const inPunch = pair.find(p => p.slot === 'IN'), outPunch = pair.find(p => p.slot === 'OUT');
     const hours = runningBreakdown(extension.workDate, inPunch, outPunch, extension);
     const proofReady = inPunch?.verification === 'APPROVED' && outPunch?.verification === 'APPROVED' &&
       (outPunch.method !== 'ADMIN' || outPunch.assignmentType === 'OFFSITE');
-    return `<div class="list-item premium-item"><div><strong>${h(extension.employeeName)} · ${h(prettyDate(extension.workDate))}</strong><p>${h(extension.source === 'ADMIN' ? 'Admin-entered offsite' : 'Employee offsite')} · In ${h(formatTime(inPunch?.timeUtc))} · Out ${h(formatShiftTime(outPunch?.timeUtc, extension.workDate))}</p><p>OT ${h(formatMinutes(hours.overtimeCandidateMinutes))} · ${h(!outPunch ? 'In progress' : hours.overtimeEligible ? extension.overtimeDecision.toLowerCase() : 'below 1 hour; regular only')} · Night ${h(formatMinutes(hours.nightCandidateMinutes))} · ${h(hours.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}</p>${outPunch && !proofReady ? '<p class="tiny-label">Approved offsite punch proof or offsite admin assignment is required before granting.</p>' : ''}${extension.overtimeReason ? `<p class="tiny-label">OT reason: ${h(extension.overtimeReason)}</p>` : ''}${extension.nightReason ? `<p class="tiny-label">Night reason: ${h(extension.nightReason)}</p>` : ''}</div><div class="premium-actions">${outPunch && hours.overtimeEligible ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Grant OT</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="REJECTED">Deny OT</button>` : ''}${outPunch && hours.nightCandidateMinutes && extension.overtimeDecision === 'APPROVED' ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Grant night</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="REJECTED">Deny night</button>` : ''}</div></div>`;
+    return `<div class="list-item premium-item"><div><strong>${h(extension.employeeName)} · ${h(prettyDate(extension.workDate))}</strong><p>${h(extension.source === 'ADMIN' ? 'Admin-entered offsite' : 'Employee offsite')} · In ${h(formatTime(inPunch?.timeUtc))} · Out ${h(formatShiftTime(outPunch?.timeUtc, extension.workDate))}</p><p>OT ${h(formatMinutes(hours.overtimeCandidateMinutes))} · ${h(!outPunch ? 'In progress' : hours.overtimeEligible ? extension.overtimeDecision.toLowerCase() : 'below 1 hour; regular only')} · Differential ${h(formatMinutes(hours.nightCandidateMinutes))} · ${h(hours.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}</p>${outPunch && !proofReady ? '<p class="tiny-label">Approved Time In and Time Out proof is required before granting.</p>' : ''}${extension.overtimeReason ? `<p class="tiny-label">OT reason: ${h(extension.overtimeReason)}</p>` : ''}${extension.nightReason ? `<p class="tiny-label">Differential reason: ${h(extension.nightReason)}</p>` : ''}</div><div class="premium-actions">${outPunch && hours.overtimeEligible ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Grant OT</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="REJECTED">Deny OT</button>` : ''}${outPunch && hours.nightCandidateMinutes && extension.overtimeDecision === 'APPROVED' ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Grant Differential</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="REJECTED">Deny Differential</button>` : ''}</div></div>`;
   }).join('')}</div>` : '<div class="empty">No offsite overtime requests in this range.</div>'}</section>`;
 }
 function renderRecords() {
-  const range = state.adminRange || currentRange();
-  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Attendance records</h1><p>Review each Time In and Time Out location separately, then grant or deny extra hours.</p></div></div><form id="records-filter" class="filters"><div class="field"><label>From</label><input type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label>To</label><input type="date" name="to" value="${h(range.end)}" required></div><div class="field"><label>Employee</label><select name="employeeId"><option value="">All employees</option>${state.employees.map(e => `<option value="${e.id}">${h(e.name)}</option>`).join('')}</select></div><button class="btn secondary" type="submit">Filter</button></form>${renderPremiumQueue()}<div class="section-head settings-extra"><h2 class="section-title">Time In & Time Out proofs</h2></div>${state.adminData.punches.length ? `<div class="list">${state.adminData.punches.map(recordItem).join('')}</div>` : '<div class="empty">No attendance records for this filter.</div>'}`;
+  const range = state.adminRange || { start: today(), end: today() };
+  return `<div class="section-head"><div><p class="eyebrow">ADMIN · ${h(dateSpan(range))}</p><h1 class="section-title">Attendance records</h1><p>Open one employee workday, review both punches, then approve it for payroll.</p></div><button class="icon-btn" type="button" data-action="records-filter" aria-label="Filter attendance by date range" title="Filter by date range"><span aria-hidden="true">☷</span></button></div>${renderPremiumQueue()}<div class="section-head settings-extra"><h2 class="section-title">Daily employee attendance</h2></div>${state.adminData.punches.length ? `<div class="list">${dailyRecordItems(state.adminData.punches)}</div>` : '<div class="empty">No attendance records for this date range.</div>'}`;
 }
 function renderEmployees() {
   const e = state.selectedEmployee;
   const days = e?.workdays || [1, 2, 3, 4, 5, 6];
-  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Employees</h1><p>Create accounts and set workdays. Regular time is fixed at 8:00 AM–5:00 PM, with the break included.</p></div><button class="btn small secondary" data-action="employee-new">New</button></div>
+  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Employees</h1><p>Create accounts and set workdays. A complete regular day is 8 hours, including 12:00–1:00 PM.</p></div><button class="btn small secondary" data-action="employee-new">New</button></div>
     <div class="split"><div class="card"><div class="card-title"><span class="symbol">♙</span> ${e ? 'EDIT EMPLOYEE' : 'CREATE EMPLOYEE'}</div>
     <form id="employee-form"><input type="hidden" name="id" value="${e?.id || ''}">
       <div class="field"><label>Name</label><input name="name" value="${h(e?.name || '')}" required maxlength="120"></div>
-      <div class="field"><label>Email / login</label><input name="email" type="email" value="${h(e?.email || '')}" required></div>
+      <div class="field"><label for="employee-mobile">Mobile number / login</label><input id="employee-mobile" name="mobile" type="tel" inputmode="numeric" pattern="[0-9]{11}" minlength="11" maxlength="11" placeholder="09XXXXXXXXX" value="${h(e?.mobile || '')}" required><p class="tiny-label">Use exactly 11 numeric characters.</p></div>
       <div class="field"><label>${e ? 'New password (leave blank to keep)' : 'Temporary password (8+ characters)'}</label><input name="password" type="password" minlength="8" ${e ? '' : 'required'} autocomplete="new-password"></div>
-      <div class="notice">Regular shift: <strong>8:00 AM–5:00 PM</strong> · 9 hours including break. Overtime and night differential are reviewed separately.</div>
+      <div class="notice">Regular schedule: <strong>8:00 AM–5:00 PM</strong> · Regular time is capped at 8 hours and includes 12:00–1:00 PM. A 9:00 AM–5:00 PM shift is therefore complete.</div>
       <div class="field"><label>Workdays</label><div class="day-picker">${[['Sun',0],['Mon',1],['Tue',2],['Wed',3],['Thu',4],['Fri',5],['Sat',6]].map(([name,n]) => `<label><input type="checkbox" name="day" value="${n}" ${days.includes(n) ? 'checked' : ''}> ${name}</label>`).join('')}</div></div>
-      ${e ? `<label class="check-row"><input name="active" type="checkbox" ${e.active ? 'checked' : ''}> Active account</label><div class="notice">${e.isDemo ? 'Demo account: excluded from payroll reports by default. Its test records can be deleted from the list.' : 'Regular employee account.'}</div>`
-        : '<label class="check-row"><input name="isDemo" type="checkbox"> Demo / test account</label><p class="card-sub">Demo accounts are excluded from payroll reports by default and can be deleted with their test records.</p>'}
+      ${e ? `<label class="check-row"><input name="active" type="checkbox" ${e.active ? 'checked' : ''}> Active account</label>` : ''}
       <button class="btn block" type="submit">${e ? 'Save employee' : 'Create account'}</button>
-    </form></div><div class="card"><div class="card-title"><span class="symbol">▤</span> EMPLOYEE LIST</div><div class="list">${state.employees.length ? state.employees.map(item => `<div class="list-item"><div><strong>${h(item.name)} ${item.isDemo ? '<span class="pill admin">DEMO</span>' : ''}</strong><p>${h(item.email)} · 8:00 AM–5:00 PM ${item.active ? '' : '· Disabled'}</p></div><div class="employee-actions"><button class="btn small secondary" data-action="employee-edit" data-id="${item.id}">Edit</button>${item.isDemo ? `<button class="btn small danger" data-action="employee-delete" data-id="${item.id}">Delete demo</button>` : ''}</div></div>`).join('') : '<div class="empty">No employees yet.</div>'}</div></div></div>`;
+    </form></div><div class="card"><div class="card-title"><span class="symbol">▤</span> EMPLOYEE LIST</div><div class="list">${state.employees.length ? state.employees.map(item => `<div class="list-item"><div><strong>${h(item.name)}</strong><p>${h(item.mobile || item.email || 'Mobile number not set')} · 8:00 AM–5:00 PM ${item.active ? '' : '· Disabled'}</p></div><div class="employee-actions"><button class="btn small secondary" data-action="employee-edit" data-id="${item.id}">Edit</button><button class="btn small danger" data-action="employee-delete" data-id="${item.id}">Delete</button></div></div>`).join('') : '<div class="empty">No employees yet.</div>'}</div></div></div>`;
 }
 function renderSettings() {
   const s = config();
   const holidays = [...(s.customHolidays || [])].sort((a, b) => a.date.localeCompare(b.date));
-  return `<div class="section-head"><div><p class="eyebrow">ADMIN SETTINGS</p><h1 class="section-title">Site, cutoff & holidays</h1><p>Manage the site pin, payroll periods, and no-work dates.</p></div><button class="btn small secondary no-print" data-nav="dashboard" aria-label="Close settings">× Close</button></div>
-    <div class="split"><div class="card"><div class="card-title"><span class="symbol">◎</span> SITE GPS</div>
-      <form id="settings-form"><div class="field"><label>Site name</label><input name="siteName" value="${h(s.siteName)}" required></div>
-      <div class="field-row"><div class="field"><label>Latitude</label><input name="siteLat" type="number" step="any" min="-90" max="90" value="${s.siteLat ?? ''}" required></div><div class="field"><label>Longitude</label><input name="siteLng" type="number" step="any" min="-180" max="180" value="${s.siteLng ?? ''}" required></div></div>
-      <button type="button" class="btn small secondary" data-action="site-my-location">Use my current location</button><p class="tiny-label">Use this only while physically at the site. Site edits are recorded in the audit trail.</p>
-      <div class="field-row"><div class="field"><label>Allowed radius (m)</label><input name="radiusM" type="number" min="25" max="2000" value="${s.radiusM}" required></div><div class="field"><label>Max GPS error (m)</label><input name="maxAccuracyM" type="number" min="10" max="500" value="${s.maxAccuracyM}" required></div></div>
-      <div class="divider"></div><div class="card-title"><span class="symbol">▤</span> PAYROLL CUTOFF</div><p class="card-sub">Two start days define the cutoff periods. Example: 11 and 26 creates 11–25 and 26–10.</p>
-      <div class="field-row"><div class="field"><label>First start day</label><input name="cutoffA" type="number" min="1" max="28" value="${s.cutoffDays[0]}" required></div><div class="field"><label>Second start day</label><input name="cutoffB" type="number" min="1" max="28" value="${s.cutoffDays[1]}" required></div></div><button class="btn block" type="submit">Save site & cutoff</button></form></div>
-      <div class="card"><div class="card-title"><span class="symbol">◇</span> HOW ONSITE WORKS</div><p class="card-sub">Employee login and attendance history work from anywhere. The site GPS pin controls whether a punch can be labelled onsite.</p><p class="card-sub">Every employee punch needs a selfie and current device location. Outside the radius, the employee uses Offsite DTR and the admin verifies it.</p>
-      <div class="map-card">${s.configured ? `<strong>${h(s.siteName)}</strong><small>${s.siteLat}, ${s.siteLng} · ${s.radiusM} m radius</small><a href="https://www.openstreetmap.org/?mlat=${s.siteLat}&mlon=${s.siteLng}#map=17/${s.siteLat}/${s.siteLng}" target="_blank" rel="noopener noreferrer">View site pin ↗</a>` : '<span class="muted">Pin not set yet.</span>'}</div></div></div>
+  return `<div class="section-head"><div><p class="eyebrow">ADMIN SETTINGS</p><h1 class="section-title">Holiday calendar</h1><p>Manage company no-work dates and review the Philippine holiday calendar.</p></div><button class="btn small secondary no-print" data-nav="profile" aria-label="Close holiday settings">× Close</button></div>
     <div class="grid settings-extra"><div class="card wide"><div class="card-title"><span class="symbol">▦</span> COMPANY HOLIDAYS · NO WORK</div><p class="card-sub">Add site or company no-work dates. Nationwide Philippine non-working holidays are already included in the schedule. Employees cannot punch on a no-work day; admins can record exceptional work.</p>
       <form id="holiday-form"><div class="field-row"><div class="field"><label>Holiday date</label><input name="date" type="date" required></div><div class="field"><label>Holiday name</label><input name="name" maxlength="80" minlength="2" placeholder="e.g. Christmas Day" required></div></div><button class="btn" type="submit">Add holiday</button></form>
       <div class="divider"></div>${holidays.length ? `<div class="list">${holidays.map(holiday => `<div class="list-item"><div><strong>${h(prettyDate(holiday.date))}</strong><p>${h(holiday.name)}</p></div><button class="btn small danger" data-action="holiday-remove" data-date="${h(holiday.date)}" aria-label="Remove ${h(holiday.name)}">Remove</button></div>`).join('')}</div>` : '<div class="empty">No company holidays added yet.</div>'}</div>
       </div><div class="grid settings-extra">${renderHolidayCard(8)}</div>`;
 }
 function renderBackfill() {
-  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Add attendance</h1><p>For no-signal field work or a documented correction.</p></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">＋</span> ADMIN-CREATED RECORD</div><form id="backfill-form"><div class="field"><label>Employee</label><select name="employeeId" required><option value="">Select employee</option>${state.employees.map(e => `<option value="${e.id}">${h(e.name)}</option>`).join('')}</select></div><div class="field"><label>Work date</label><input name="workDate" type="date" value="${h(today())}" required></div><div class="field-row"><div class="field"><label>Time In (optional)</label><input name="timeIn" type="time"></div><div class="field"><label>Time Out (optional)</label><input name="timeOut" type="time"></div></div><label class="check-row"><input name="timeOutNextDay" type="checkbox"> Time Out is after midnight (next day, no later than 6:00 AM)</label><label class="check-row"><input name="offsite" type="checkbox"> Offsite / field assignment — calculate overtime and night hours for review</label><div class="field"><label>Reason / field assignment</label><textarea name="reason" minlength="5" maxlength="300" required placeholder="e.g. No mobile signal at client site"></textarea></div><label class="check-row"><input name="replaceExisting" type="checkbox"> Replace an existing punch with an audited correction</label><button class="btn block" type="submit">Save admin-created attendance</button></form></div><div class="card"><div class="card-title"><span class="symbol">ⓘ</span> HOW HOURS ARE COUNTED</div><p class="card-sub">Regular time is 8:00 AM–5:00 PM, including break. Offsite overtime is calculated from 5:00–10:00 PM and only qualifies after 1 hour. Night differential runs from 10:00 PM to 6:00 AM.</p><p class="card-sub">A selfie or GPS is not required for admin-created attendance. Actual punch times are shown immediately; overtime and night hours appear in Records for separate approval. Corrections reset those approvals.</p><button class="link-button" data-nav="records">Review extra hours ›</button></div></div>`;
+  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Add attendance</h1><p>For no-signal field work or a documented correction.</p></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">＋</span> ADMIN-CREATED RECORD</div><form id="backfill-form"><div class="field"><label>Employee</label><select name="employeeId" required><option value="">Select employee</option>${state.employees.map(e => `<option value="${e.id}">${h(e.name)}</option>`).join('')}</select></div><div class="field"><label>Work date</label><input name="workDate" type="date" value="${h(today())}" required></div><div class="field-row"><div class="field"><label>Time In (optional)</label><input name="timeIn" type="time"></div><div class="field"><label>Time Out (optional)</label><input name="timeOut" type="time"></div></div><label class="check-row"><input name="timeOutNextDay" type="checkbox"> Time Out is after midnight (next day, no later than 6:00 AM)</label><label class="check-row"><input name="offsite" type="checkbox"> Offsite / field assignment — calculate overtime and Differential for review</label><div class="field"><label>Reason / field assignment</label><textarea name="reason" minlength="5" maxlength="300" required placeholder="e.g. No mobile signal at client site"></textarea></div><label class="check-row replace-check"><input name="replaceExisting" type="checkbox"> Overwrite matching Time In / Time Out already saved on this workday</label><p class="tiny-label">The old punch remains in the audit history, but the corrected punch becomes the active payroll record.</p><button class="btn block" type="submit">Save admin-created attendance</button></form></div><div class="card"><div class="card-title"><span class="symbol">ⓘ</span> HOW HOURS ARE COUNTED</div><p class="card-sub">Regular time starts at 8:00 AM and is capped at 8 hours, including 12:00–1:00 PM. Missing hours can be recovered after 5:00 PM before overtime begins.</p><p class="card-sub">Hours from 10:00 PM–6:00 AM are Differential and never count as regular time. A selfie or GPS is not required for admin-created attendance. Corrections reset premium approvals.</p><button class="link-button" data-nav="records">Review extra hours ›</button></div></div>`;
 }
 function reportRows() {
   const range = state.reportRange || currentRange();
   const punches = state.adminData.punches;
   const otMap = new Map(state.adminData.overtime.map(o => [`${o.user_id}|${o.work_date}`, o.minutes]));
   const extensionMap = new Map((state.adminData.extensions || []).map(item => [`${item.userId}|${item.workDate}`, item]));
-  return state.employees.filter(employee => state.includeDemoReport || !employee.isDemo).map(employee => {
+  return state.employees.map(employee => {
     const rows = [];
-    const totals = { present: 0, noRecord: 0, holidays: 0, late: 0, undertime: 0,
+    const totals = { noRecord: 0, holidays: 0, undertime: 0,
       regular: 0, overtime: 0, night: 0, pending: 0 };
     for (let date = range.start; date <= range.end; date = tomorrow(date)) {
       const pair = punches.filter(p => p.userId === employee.id && p.workDate === date);
@@ -455,65 +642,113 @@ function reportRows() {
       else if (status === 'No record' && date > today()) status = 'Upcoming';
       else if (status === 'No record' && date === today()) status = 'Today · not recorded';
       else if (!scheduled) status = `${status} (off day)`;
-      const late = minutesStatus(inPunch, outPunch, employee, date).late;
       const hours = premiumBreakdown(date, inPunch, outPunch, extension);
-      const legacyOvertime = extension ? 0 : (otMap.get(`${employee.id}|${date}`) || 0);
-      const overtime = (hours.overtimeEligible && extension?.overtimeDecision === 'APPROVED'
+      const payrollReady = isPayrollReady(inPunch, outPunch);
+      const legacyOvertime = payrollReady && !extension ? (otMap.get(`${employee.id}|${date}`) || 0) : 0;
+      const overtime = (payrollReady && hours.overtimeEligible && extension?.overtimeDecision === 'APPROVED'
         ? hours.overtimeCandidateMinutes : 0) + legacyOvertime;
-      const night = hours.nightCandidateMinutes && extension?.overtimeDecision === 'APPROVED' &&
-        extension?.nightDecision === 'APPROVED' ? hours.nightCandidateMinutes : 0;
+      const night = payrollReady && hours.nightCandidateMinutes && (!extension ||
+        extension.overtimeDecision === 'APPROVED' && extension.nightDecision === 'APPROVED')
+        ? hours.nightCandidateMinutes : 0;
       const overtimeStatus = !extension ? (legacyOvertime ? 'Admin granted' : 'No request') : !outPunch
         ? 'In progress' : hours.overtimeEligible ? extension.overtimeDecision : 'Below 1h · regular only';
-      const nightStatus = hours.nightCandidateMinutes ? extension.nightDecision : '—';
-      if (status.startsWith('Present')) totals.present++;
+      const nightStatus = hours.nightCandidateMinutes ? (extension?.nightDecision || 'Included with attendance') : '—';
       if (status === 'No record' && scheduled) totals.noRecord++;
       if (holiday) totals.holidays++;
       if (status.startsWith('Pending verification') || status.startsWith('Needs correction') ||
           overtimeStatus === 'PENDING' || nightStatus === 'PENDING') totals.pending++;
-      totals.late += late; totals.undertime += scheduled ? hours.undertimeMinutes : 0;
-      totals.regular += hours.regularMinutes; totals.overtime += overtime; totals.night += night;
-      rows.push({ date, inPunch, outPunch, status, late, undertime: scheduled ? hours.undertimeMinutes : 0,
-        regular: hours.regularMinutes, overtime, night, overtimeStatus, nightStatus });
+      totals.undertime += scheduled && payrollReady ? hours.undertimeMinutes : 0;
+      totals.regular += payrollReady ? hours.regularMinutes : 0; totals.overtime += overtime; totals.night += night;
+      rows.push({ date, inPunch, outPunch, undertime: scheduled && payrollReady ? hours.undertimeMinutes : 0,
+        regular: payrollReady ? hours.regularMinutes : 0, overtime, night });
     }
     return { employee, rows, totals };
   });
 }
-function renderReportEmployee({ employee, rows, totals }) {
-  const body = rows.map(row => `<tr><td>${h(prettyDate(row.date))}</td>
-    <td>${h(formatShiftTime(row.inPunch?.timeUtc, row.date))}</td>
-    <td>${h(formatShiftTime(row.outPunch?.timeUtc, row.date))}</td>
-    <td>${h(punchSource(row.inPunch))} / ${h(punchSource(row.outPunch))}</td>
-    <td>${h(formatMinutes(row.regular))}</td><td>${h(formatMinutes(row.late))}</td>
-    <td>${h(formatMinutes(row.undertime))}</td>
-    <td>${h(formatMinutes(row.overtime))}<br>${h(row.overtimeStatus)}</td>
-    <td>${h(formatMinutes(row.night))}<br>${h(row.nightStatus)}</td><td>${h(row.status)}</td></tr>`).join('');
-  return `<section class="report-employee"><h3>${h(employee.name)}</h3>
-    <p class="report-summary"><strong>Total regular ${h(formatMinutes(totals.regular))}</strong> · <strong>Total overtime granted ${h(formatMinutes(totals.overtime))}</strong> · <strong>Total night differential granted ${h(formatMinutes(totals.night))}</strong> · Undertime ${h(formatMinutes(totals.undertime))} · Late ${h(formatMinutes(totals.late))} · Exceptions ${totals.pending}</p>
-    <p class="report-summary">Present ${totals.present} · No record ${totals.noRecord} · Holidays ${totals.holidays}</p>
-    <div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Source</th><th>Regular</th><th>Late</th><th>Undertime</th><th>OT granted / review</th><th>Night granted / review</th><th>Status</th></tr></thead><tbody>${body}</tbody></table></div></section>`;
+function renderReportHeader(range, generated, className = '') {
+  return `<div class="${className}"><div class="report-head"><div class="report-brand"><img src="${h(state.branding.logo512Url || '/aoda-report-logo.jpg')}" alt="Philippine AODA Power Corp. logo"><div class="report-company"><h2>PHILIPPINE AODA POWER CORP.</h2><p>PCCCII BLDG., MOONSTONE AVE., GRAND CENTENNIAL HOMES,<br>KAWIT 4104, CAVITE, PHILIPPINES</p></div></div></div>
+    <div class="report-meta"><div><strong>EMPLOYEE ATTENDANCE SUMMARY</strong><p>${h(state.branding.appName)} · Cutoff: ${h(numericDate(range.start))} – ${h(numericDate(range.end))} · Asia/Manila</p></div><small>Generated: ${h(generated)}</small></div>
+    <p class="report-policy">Only admin-approved daily attendance enters payroll. Regular time starts at 8:00 AM, includes 12:00–1:00 PM, and may extend after 5:00 PM until 8 hours are complete. OT begins only after 5:00 PM and after 8 regular hours. Work from 10:00 PM–6:00 AM is reported separately as Differential.</p></div>`;
+}
+function renderReportEmployee({ employee, rows, totals }, range, generated) {
+  const body = rows.map(row => `<tr><td data-label="Date">${h(numericDate(row.date))}</td>
+    <td data-label="Time In">${h(formatShiftTime(row.inPunch?.timeUtc, row.date))}</td>
+    <td data-label="Time Out">${h(formatShiftTime(row.outPunch?.timeUtc, row.date))}</td>
+    <td data-label="Source">${h(punchSource(row.inPunch))} / ${h(punchSource(row.outPunch))}</td>
+    <td data-label="Regular">${h(formatMinutes(row.regular))}</td><td data-label="Undertime">${h(formatMinutes(row.undertime))}</td>
+    <td data-label="OT">${h(formatMinutes(row.overtime))}</td><td data-label="Differential">${h(formatMinutes(row.night))}</td></tr>`).join('');
+  return `<section class="report-employee">${renderReportHeader(range, generated, 'employee-report-header')}<div class="report-employee-head"><div><span>EMPLOYEE</span><h3>${h(employee.name)}</h3></div><div class="report-total"><span>Approved regular</span><strong>${h(formatMinutes(totals.regular))}</strong></div></div>
+    <div class="report-summary-grid"><div><span>OT</span><strong>${h(formatMinutes(totals.overtime))}</strong></div><div><span>Differential</span><strong>${h(formatMinutes(totals.night))}</strong></div><div><span>Undertime</span><strong>${h(formatMinutes(totals.undertime))}</strong></div><div><span>Exceptions</span><strong>${totals.pending}</strong></div><div><span>No record</span><strong>${totals.noRecord}</strong></div><div><span>Holidays</span><strong>${totals.holidays}</strong></div></div>
+    <div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Source</th><th>Regular</th><th>Undertime</th><th>OT</th><th>Differential</th></tr></thead><tbody>${body}</tbody></table></div></section>`;
 }
 function renderReport() {
   const range = state.reportRange || currentRange();
   const report = reportRows();
-  return `<div class="section-head no-print"><div><p class="eyebrow">PAYROLL</p><h1 class="section-title">Cutoff report</h1><p>Logged regular hours include break. Only admin-granted overtime and night hours enter premium totals.</p></div><div class="header-actions"><button class="btn small secondary" data-nav="dashboard" aria-label="Close report">× Close</button><button class="btn" data-action="print">Print / Save PDF</button></div></div>
-    <form id="report-filter" class="filters no-print"><div class="field"><label>From</label><input type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label>To</label><input type="date" name="to" value="${h(range.end)}" required></div><label class="check-row"><input name="includeDemo" type="checkbox" ${state.includeDemoReport ? 'checked' : ''}> Include demo data for testing</label><button class="btn secondary" type="submit">Show report</button></form>
-    <div class="report-sheet"><div class="report-head"><div class="report-brand"><img src="${h(state.branding.logo512Url || '/aoda-report-logo.jpg')}" alt="Philippine AODA Power Corp. logo"><div class="report-company"><h2>PHILIPPINE AODA POWER CORP.</h2><p>PCCCII BLDG., MOONSTONE AVE., GRAND CENTENNIAL HOMES,<br>KAWIT 4104, CAVITE, PHILIPPINES</p></div></div></div>
-    <div class="report-meta"><div><strong>EMPLOYEE ATTENDANCE SUMMARY</strong><p>${h(state.branding.appName)} · Cutoff: ${h(dateSpan(range))} · Asia/Manila</p></div><small>Generated: ${h(new Date().toLocaleString('en-PH', { timeZone }))}</small></div>
-    <p class="report-policy">${state.includeDemoReport ? '<strong>TEST REPORT — DEMO DATA INCLUDED.</strong><br>' : ''}Regular: 8:00 AM–5:00 PM (9h, break included) · OT: 5:00–10:00 PM, minimum 1h · Night differential: 10:00 PM–6:00 AM. Punch times are actual; pending or denied premiums are excluded from granted totals.</p>
-    ${report.length ? report.map(renderReportEmployee).join('') : '<p class="empty">No regular employees in this report. Select “Include demo data for testing” to preview the demo account.</p>'}</div>`;
+  const generated = new Date().toLocaleString('en-PH', { timeZone });
+  return `<div class="section-head no-print"><div><p class="eyebrow">PAYROLL</p><h1 class="section-title">Cutoff report</h1><p>Only daily attendance approved by the admin is included in payroll totals.</p></div><button class="icon-btn print-button" type="button" data-action="print" aria-label="Print or save PDF" title="Print / Save PDF"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9V3h10v6M7 18H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2 2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M7 14h10v7H7z"/><path d="M17.5 12h.01"/></svg></button></div>
+    <form id="report-filter" class="filters no-print"><div class="field"><label>From</label><input type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label>To</label><input type="date" name="to" value="${h(range.end)}" required></div><button class="btn secondary" type="submit">Show report</button></form>
+    <div class="report-sheet">${renderReportHeader(range, generated, 'report-cover-header')}
+    ${report.length ? report.map(item => renderReportEmployee(item, range, generated)).join('') : '<p class="empty">No employees found for this report.</p>'}</div>`;
 }
 function haversine(lat1, lng1, lat2, lng2) {
   const rad = Math.PI / 180, dLat = (lat2 - lat1) * rad, dLng = (lng2 - lng1) * rad;
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(dLng / 2) ** 2;
   return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
-function geo() {
-  return new Promise((resolve, reject) => {
-    if (!navigator.geolocation) return reject(new Error('Location is unavailable on this device.'));
-    navigator.geolocation.getCurrentPosition(position => resolve({ latitude: position.coords.latitude, longitude: position.coords.longitude, accuracyM: position.coords.accuracy }),
-      error => reject(new Error(error.code === 1 ? 'Location permission was denied. Enable it in browser settings.' : 'Unable to get current location. Move to an open area and retry.')),
-      { enableHighAccuracy: true, maximumAge: 0, timeout: 16000 });
-  });
+function geoAttempt(options) {
+  return new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(
+    position => resolve({ latitude: position.coords.latitude, longitude: position.coords.longitude, accuracyM: position.coords.accuracy }),
+    reject,
+    options
+  ));
+}
+function geoError(error) {
+  if (error?.code === 1) return new Error('Location access is blocked. Open this site’s browser permissions, allow Location, then tap Try again.');
+  if (error?.code === 3) return new Error('Location request timed out. Turn on device Location/GPS, move near a window or outdoors, then try again.');
+  return new Error('Your device could not determine its location. Turn on Location/GPS and Wi-Fi, then try again.');
+}
+async function geo() {
+  if (!window.isSecureContext) throw new Error('Location requires a secure HTTPS connection.');
+  if (!navigator.geolocation) throw new Error('This browser does not provide device location. Enter the latitude and longitude manually.');
+  const policy = document.permissionsPolicy || document.featurePolicy;
+  if (policy?.allowsFeature && !policy.allowsFeature('geolocation')) throw new Error('Location is blocked in this browser window. Open the site directly in Chrome, Edge, or Safari, or enter the coordinates manually.');
+  try {
+    const permission = await navigator.permissions?.query?.({ name: 'geolocation' });
+    if (permission?.state === 'denied') throw Object.assign(new Error(), { code: 1 });
+  } catch (error) {
+    if (error?.code === 1) throw geoError(error);
+    // Some browsers do not support querying geolocation permission; the location request still can.
+  }
+  try {
+    return await geoAttempt({ enableHighAccuracy: true, maximumAge: 0, timeout: 22000 });
+  } catch (firstError) {
+    if (firstError?.code === 1) throw geoError(firstError);
+    try {
+      return await geoAttempt({ enableHighAccuracy: false, maximumAge: 300000, timeout: 14000 });
+    } catch (fallbackError) {
+      throw geoError(fallbackError);
+    }
+  }
+}
+async function refreshOnsiteAccess(renderAfter = true) {
+  const site = config();
+  if (!site?.configured) {
+    state.onsiteAccess = { status: 'unconfigured', message: 'Admin must set the site GPS first.' };
+  } else {
+    state.onsiteAccess = { status: 'checking', message: 'Checking your GPS location…' };
+    if (renderAfter && state.section === 'home') renderView();
+    try {
+      const location = await geo();
+      const distanceM = Math.round(haversine(location.latitude, location.longitude, site.siteLat, site.siteLng));
+      const allowed = distanceM <= site.radiusM && location.accuracyM <= site.maxAccuracyM;
+      state.onsiteAccess = { status: allowed ? 'inside' : 'outside', allowed, location, distanceM,
+        message: allowed ? `Inside ${site.siteName} · ${distanceM} m from site pin` : `Outside ${site.siteName} · ${distanceM} m from site pin` };
+    } catch (error) {
+      state.onsiteAccess = { status: 'error', allowed: false, message: error.message };
+    }
+  }
+  if (renderAfter && state.section === 'home') renderView();
+  return state.onsiteAccess;
 }
 async function checkSitePrompt() {
   if (state.sitePromptedDate === today() || !config()?.configured || getTodayPunch('IN') || holidayFor(today(), config().holidays)) return;
@@ -531,22 +766,71 @@ async function checkSitePrompt() {
 function showModal(modal) {
   const holder = document.getElementById('modal-root'); if (!holder) return;
   state.modal = modal;
-  if (modal.kind === 'arrival') {
+  if (modal.kind === 'edit-profile') {
+    const user = state.session.user;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="edit-profile-title"><div class="modal-head"><div><p class="modal-kicker">ADMIN ACCOUNT</p><h2 id="edit-profile-title">Edit Profile</h2></div><button class="close" data-action="modal-close" aria-label="Close Edit Profile">×</button></div><div class="modal-profile"><div class="profile-avatar profile-avatar-preview" id="profile-photo-preview">${avatarMarkup(user)}</div><div><strong>${h(user.name)}</strong><p>${h(user.email)}</p></div></div><section class="modal-section"><h3>Profile photo</h3><p>Choose a clear photo for your account and header.</p><form id="profile-photo-form"><div class="field"><label for="profile-photo">Upload image</label><input id="profile-photo" type="file" accept="image/png,image/jpeg,image/webp"></div>${user.profileImageUrl ? '<label class="check-row"><input type="checkbox" name="removePhoto"> Remove current picture</label>' : ''}<div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn" type="submit">Save Profile</button></div></form></section><section class="modal-section"><h3>Security</h3><p>Change your password without leaving this window.</p><form id="password-form"><div class="field-row"><div class="field"><label for="current-password">Current password</label><input id="current-password" name="currentPassword" type="password" autocomplete="current-password" required></div><div class="field"><label for="new-password">New password</label><input id="new-password" name="newPassword" type="password" minlength="8" autocomplete="new-password" required></div></div><button class="btn secondary block" type="submit">Save New Password</button></form></section></div></div>`;
+  } else if (modal.kind === 'update-app') {
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="update-app-title"><div class="modal-head"><div><p class="modal-kicker">APP SETTINGS</p><h2 id="update-app-title">Update App</h2></div><button class="close" data-action="modal-close" aria-label="Close Update App">×</button></div><p>Change the name and logo shown in the header, login screen, browser title, and installed app.</p>${renderBrandingForm()}</div></div>`;
+  } else if (modal.kind === 'site-settings') {
+    const s = config();
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="site-settings-title"><div class="modal-head"><div><p class="modal-kicker">SITE SETTINGS</p><h2 id="site-settings-title">Set Site GPS</h2></div><button class="close" data-action="modal-close" aria-label="Close Site GPS settings">×</button></div><p>Set the location employees must be near for an onsite punch.</p><form id="site-settings-form"><div class="field"><label for="site-name">Site name</label><input id="site-name" name="siteName" value="${h(s.siteName)}" required></div><div class="field-row"><div class="field"><label for="site-latitude">Latitude</label><input id="site-latitude" name="siteLat" type="number" step="any" min="-90" max="90" value="${s.siteLat ?? ''}" required></div><div class="field"><label for="site-longitude">Longitude</label><input id="site-longitude" name="siteLng" type="number" step="any" min="-180" max="180" value="${s.siteLng ?? ''}" required></div></div><button type="button" class="btn small secondary site-location-button" data-action="site-my-location"><span aria-hidden="true">◎</span> Use my current location</button><div id="site-location-status" class="site-location-status" role="status" aria-live="polite"><span aria-hidden="true">ⓘ</span><p>While physically at the site, allow Location when your browser asks. You can also enter both coordinates manually.</p></div><div class="field-row"><div class="field"><label for="site-radius">Allowed radius (m)</label><input id="site-radius" name="radiusM" type="number" min="25" max="2000" value="${s.radiusM}" required></div><div class="field"><label for="site-accuracy">Max GPS error (m)</label><input id="site-accuracy" name="maxAccuracyM" type="number" min="10" max="500" value="${s.maxAccuracyM}" required></div></div><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn" type="submit">Save Site GPS</button></div></form></div></div>`;
+  } else if (modal.kind === 'payroll-settings') {
+    const month = today().slice(0, 7), [firstDay, secondDay] = [...config().cutoffDays].sort((a, b) => a - b);
+    const firstStart = monthDate(month, firstDay), secondStart = monthDate(month, secondDay);
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="payroll-settings-title"><div class="modal-head"><div><p class="modal-kicker">PAYROLL SETTINGS</p><h2 id="payroll-settings-title">Set Payroll Cutoff</h2></div><button class="close" data-action="modal-close" aria-label="Close Payroll settings">×</button></div><p>Select a month first, then choose the two cutoff start dates. The date ranges update to match that calendar month.</p><form id="payroll-settings-form"><div class="field"><label for="payroll-month">Payroll month</label><input id="payroll-month" name="payrollMonth" type="month" value="${month}" required></div><div class="field-row"><div class="field"><label for="cutoff-first-start">First cutoff starts</label><input id="cutoff-first-start" name="firstStart" type="date" min="${month}-01" max="${monthEnd(month)}" value="${firstStart}" required></div><div class="field"><label for="cutoff-second-start">Second cutoff starts</label><input id="cutoff-second-start" name="secondStart" type="date" min="${month}-01" max="${monthEnd(month)}" value="${secondStart}" required></div></div><div class="cutoff-preview" id="payroll-preview">${payrollPreviewMarkup(month, firstStart, secondStart)}</div><div class="notice">Sundays are not counted as scheduled cutoff days by default. If an employee works on Sunday, use <strong>Add attendance</strong>; that record will still appear in payroll as off-day work.</div><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn" type="submit">Save Payroll</button></div></form></div></div>`;
+  } else if (modal.kind === 'records-filter') {
+    const range = state.adminRange || { start: today(), end: today() };
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal filter-modal" role="dialog" aria-modal="true" aria-labelledby="records-filter-title"><div class="modal-head"><div><p class="modal-kicker">ATTENDANCE RECORDS</p><h2 id="records-filter-title">Filter Date Range</h2></div><button class="close" data-action="modal-close" aria-label="Close date filter">×</button></div><p>Records show today by default. Choose another date range when needed.</p><form id="records-filter"><div class="field-row"><div class="field"><label for="records-from">From</label><input id="records-from" type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label for="records-to">To</label><input id="records-to" type="date" name="to" value="${h(range.end)}" required></div></div><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn" type="submit">Apply Filter</button></div></form></div></div>`;
+  } else if (modal.kind === 'employee-confirm') {
+    const { input, editing } = modal;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="employee-confirm-title"><div class="modal-head"><div><p class="modal-kicker">REVIEW ACTION</p><h2 id="employee-confirm-title">Review employee account</h2></div><button class="close" data-action="modal-close" aria-label="Close employee review">×</button></div><p>Check these details before ${editing ? 'updating' : 'creating'} the account.</p><div class="review-list"><div class="review-row"><span>Action</span><strong>${editing ? 'Update employee' : 'Create employee'}</strong></div><div class="review-row"><span>Name</span><strong>${h(input.name)}</strong></div><div class="review-row"><span>Mobile login</span><strong>${h(input.mobile)}</strong></div><div class="review-row"><span>Workdays</span><strong>${h(workdayLabel(input.workdays))}</strong></div>${editing ? `<div class="review-row"><span>Account</span><strong>${input.active ? 'Active' : 'Disabled'}</strong></div>` : ''}<div class="review-row"><span>Password</span><strong>${input.password ? (editing ? 'Will be changed' : 'Temporary password is set') : 'Keep current password'}</strong></div></div><div class="notice warn">Confirm only after reviewing the employee login and schedule.</div><form id="employee-confirm-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm &amp; ${editing ? 'Save' : 'Create'}</button></div></form></div></div>`;
+  } else if (modal.kind === 'attendance-confirm') {
+    const { input, employeeName } = modal;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="attendance-confirm-title"><div class="modal-head"><div><p class="modal-kicker">REVIEW ACTION</p><h2 id="attendance-confirm-title">Review manual attendance</h2></div><button class="close" data-action="modal-close" aria-label="Close attendance review">×</button></div><p>Verify the attendance details before saving this record.</p><div class="review-list"><div class="review-row"><span>Employee</span><strong>${h(employeeName)}</strong></div><div class="review-row"><span>Work date</span><strong>${h(numericDate(input.workDate))}</strong></div><div class="review-row"><span>Time In</span><strong>${h(input.timeIn || 'Not provided')}</strong></div><div class="review-row"><span>Time Out</span><strong>${h(input.timeOut ? `${input.timeOut}${input.timeOutNextDay ? ' · next day' : ''}` : 'Not provided')}</strong></div><div class="review-row"><span>Assignment</span><strong>${input.offsite ? 'Offsite / field' : 'Onsite'}</strong></div><div class="review-row"><span>Replace existing</span><strong>${input.replaceExisting ? 'Yes' : 'No'}</strong></div><div class="review-row"><span>Reason</span><strong>${h(input.reason)}</strong></div></div><div class="notice ${input.replaceExisting ? 'warn' : ''}">${input.replaceExisting ? 'Matching punches on this workday will be overwritten. The previous entries remain in the audit history.' : 'This manual attendance will be added to the employee record.'}</div><form id="attendance-confirm-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm &amp; Save</button></div></form></div></div>`;
+  } else if (modal.kind === 'arrival') {
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-label="Onsite arrival"><div class="modal-head"><h2>You're at ${h(config().siteName)} 👋</h2><button class="close" data-action="modal-close" aria-label="Close">×</button></div><p>Your onsite Time In is not recorded yet. Take a selfie and confirm to save your attendance.</p><div class="map-card">Within site radius · GPS accuracy ±${Math.round(modal.location.accuracyM)} m</div><div class="card-actions"><button class="btn" data-action="arrival-time-in">Open Time In</button><button class="btn secondary" data-action="modal-close">Later</button></div></div></div>`;
-  } else if (modal.kind === 'record') {
-    const p = modal.punch;
-    holder.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-label="Punch details"><div class="modal-head"><h2>${h(p.employeeName)} · ${h(p.slot === 'IN' ? 'Time In' : 'Time Out')}</h2><button class="close" data-action="modal-close" aria-label="Close">×</button></div><p>${h(prettyDate(p.workDate))} at <strong>${h(formatTime(p.timeUtc))}</strong> · ${h(p.method)}</p><p>${badge(p)}</p>${p.method === 'SYSTEM' ? '<div class="notice">Shift automatically closed at 6:00 AM. No exit selfie or GPS was captured.</div>' : p.method === 'ADMIN' ? `<div class="notice">Created by admin · ${h(p.assignmentType || 'assignment not set')}. Reason: ${h(p.note)}</div>` : `<div class="map-card"><strong>${p.latitude}, ${p.longitude}</strong><small>GPS accuracy ±${Math.round(p.accuracyM)} m · ${p.distanceM == null ? 'Offsite' : `${Math.round(p.distanceM)} m from site`} · Site setting v${p.siteVersion || '—'}</small>${mapLink(p)}</div><div style="height:12px"></div>${p.hasSelfie ? `<p class="card-sub">Loading selfie…</p><img class="detail-photo hidden" id="proof-selfie" alt="Employee selfie proof">` : ''}`}<p class="card-sub">${h(p.note || '')}</p>${p.verification === 'REJECTED' ? `<p class="notice error">Rejected: ${h(p.rejectionReason)}</p>` : ''}${p.method === 'OFFSITE' ? `<div class="card-actions"><button class="btn" data-action="verify-approve" data-id="${p.id}">Approve</button><button class="btn danger" data-action="verify-reject" data-id="${p.id}">Reject</button></div>` : ''}</div></div>`;
+  } else if (modal.kind === 'record-day') {
+    const inPunch = modal.punches.find(p => p.slot === 'IN'), outPunch = modal.punches.find(p => p.slot === 'OUT');
+    const payrollReady = isPayrollReady(inPunch, outPunch);
+    const reviewAction = payrollReady
+      ? '<div class="notice success proof-payroll-status"><strong>Daily attendance approved.</strong> This day is included in payroll.</div>'
+      : inPunch && outPunch
+        ? `<div class="proof-approve"><p>Review both punch times, GPS locations, and photos before approval.</p><button class="btn" data-action="approve-attendance-day" data-user-id="${h(inPunch.userId)}" data-work-date="${h(modal.workDate)}">Approve Daily Attendance</button></div>`
+        : '<div class="notice warn proof-payroll-status">Time In and Time Out must both be recorded before this day can be approved for payroll.</div>';
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal proof-modal" role="dialog" aria-modal="true" aria-labelledby="proof-day-title"><div class="modal-head"><div><p class="modal-kicker">DAILY ATTENDANCE REVIEW</p><h2 id="proof-day-title">${h(modal.employeeName)}</h2><p>${h(prettyDate(modal.workDate))}</p></div><button class="close" data-action="modal-close" aria-label="Close daily proof">×</button></div><div class="proof-rows">${punchProofRow(inPunch, 'IN')}${punchProofRow(outPunch, 'OUT')}</div>${reviewAction}</div></div>`;
+  } else if (modal.kind === 'approve-day') {
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="approve-day-title"><div class="modal-head"><div><p class="modal-kicker">CONFIRM ATTENDANCE</p><h2 id="approve-day-title">Approve daily attendance?</h2></div><button class="close" data-action="modal-close" aria-label="Close attendance approval">×</button></div><p><strong>${h(modal.employeeName)}</strong> · ${h(prettyDate(modal.workDate))}</p><div class="notice">This approves both Time In and Time Out. The approved workday will be included in payroll.</div><form id="approve-day-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm Approval</button></div></form></div></div>`;
   } else if (modal.kind === 'premium') {
     const { extension, stage, decision } = modal;
     const pin = extension.latitude == null ? '<p class="card-sub">Admin-created offsite attendance · no employee GPS proof.</p>'
-      : `<div class="map-card"><strong>Continuation GPS: ${h(extension.latitude)}, ${h(extension.longitude)}</strong><small>Accuracy ±${h(Math.round(extension.accuracyM))} m</small><a href="https://www.openstreetmap.org/?mlat=${extension.latitude}&mlon=${extension.longitude}#map=18/${extension.latitude}/${extension.longitude}" target="_blank" rel="noopener noreferrer">Open continuation map pin ↗</a></div>`;
-    holder.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-label="Review extra hours"><div class="modal-head"><h2>${decision === 'APPROVED' ? 'Grant' : 'Deny'} ${stage === 'OVERTIME' ? 'overtime' : 'night differential'}</h2><button class="close" data-action="modal-close" aria-label="Close">×</button></div><p>${h(extension.employeeName)} · ${h(prettyDate(extension.workDate))}</p>${pin}<form id="premium-review-form"><input type="hidden" name="id" value="${h(extension.id)}"><input type="hidden" name="stage" value="${h(stage)}"><input type="hidden" name="decision" value="${h(decision)}"><div class="field"><label for="premium-reason">Reason (optional)</label><textarea id="premium-reason" name="reason" maxlength="300" placeholder="Add a note for the payroll audit trail"></textarea></div><button class="btn block ${decision === 'REJECTED' ? 'danger' : ''}" type="submit">Confirm ${decision === 'APPROVED' ? 'grant' : 'denial'}</button></form></div></div>`;
-  } else if (modal.kind === 'delete-demo') {
+      : `<div class="map-card"><strong>Continuation GPS: ${h(extension.latitude)}, ${h(extension.longitude)}</strong><small>Accuracy ±${h(Math.round(extension.accuracyM))} m</small>${mapLink(extension, 'Open continuation in Google Maps ↗')}</div>`;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-label="Review extra hours"><div class="modal-head"><h2>${decision === 'APPROVED' ? 'Grant' : 'Deny'} ${stage === 'OVERTIME' ? 'overtime' : 'Differential'}</h2><button class="close" data-action="modal-close" aria-label="Close">×</button></div><p>${h(extension.employeeName)} · ${h(prettyDate(extension.workDate))}</p>${pin}<form id="premium-review-form"><input type="hidden" name="id" value="${h(extension.id)}"><input type="hidden" name="stage" value="${h(stage)}"><input type="hidden" name="decision" value="${h(decision)}"><div class="field"><label for="premium-reason">Reason (optional)</label><textarea id="premium-reason" name="reason" maxlength="300" placeholder="Add a note for the payroll audit trail"></textarea></div><button class="btn block ${decision === 'REJECTED' ? 'danger' : ''}" type="submit">Confirm ${decision === 'APPROVED' ? 'grant' : 'denial'}</button></form></div></div>`;
+  } else if (modal.kind === 'delete-employee') {
     const e = modal.employee;
-    holder.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-label="Delete demo employee"><div class="modal-head"><h2>Delete demo account</h2><button class="close" data-action="modal-close" aria-label="Close">×</button></div><p><strong>${h(e.name)}</strong> · ${h(e.email)}</p><p class="notice warn">This permanently deletes the demo account, its attendance, review requests, sessions, and selfies. The audit trail remains.</p><form id="delete-demo-form"><input type="hidden" name="id" value="${h(e.id)}"><div class="field"><label>Type DELETE to confirm</label><input name="confirmation" required autocomplete="off" pattern="DELETE"></div><button class="btn danger block" type="submit">Delete demo and test records</button></form></div></div>`;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="delete-employee-title"><div class="modal-head"><div><p class="modal-kicker">CONFIRM DELETION</p><h2 id="delete-employee-title">Delete employee account?</h2></div><button class="close" data-action="modal-close" aria-label="Close employee deletion">×</button></div><p><strong>${h(e.name)}</strong> · ${h(e.mobile || e.email)}</p><p class="notice warn">This permanently deletes the employee account, attendance, review requests, sessions, and selfies. The audit trail remains.</p><form id="delete-employee-form"><input type="hidden" name="id" value="${h(e.id)}"><div class="field"><label>Type DELETE to confirm</label><input name="confirmation" required autocomplete="off" pattern="DELETE"></div><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn danger" type="submit">Confirm deletion</button></div></form></div></div>`;
+  } else if (modal.kind === 'delete-holiday') {
+    const holiday = modal.holiday;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="delete-holiday-title"><div class="modal-head"><div><p class="modal-kicker">CONFIRM DELETION</p><h2 id="delete-holiday-title">Remove holiday?</h2></div><button class="close" data-action="modal-close" aria-label="Close holiday deletion">×</button></div><p><strong>${h(holiday.name)}</strong> · ${h(numericDate(holiday.date))}</p><p class="notice warn">Employees will be scheduled normally on this date after removal.</p><form id="delete-holiday-form"><input type="hidden" name="date" value="${h(holiday.date)}"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn danger" type="submit">Confirm removal</button></div></form></div></div>`;
   }
+  requestAnimationFrame(() => holder.querySelector('.close')?.focus());
 }
 function closeModal() { state.modal = null; const holder = document.getElementById('modal-root'); if (holder) holder.innerHTML = ''; }
+async function loadProofSelfies(punches) {
+  await Promise.all(punches.filter(item => item.hasSelfie).map(async item => {
+    try {
+      const data = await client.action(functions.storageActions.selfie, { token: accessToken, id: item.id });
+      const img = document.getElementById(`proof-selfie-${item.id}`);
+      if (img && state.modal?.kind === 'record-day' && state.modal.punches.some(current => current.id === item.id)) {
+        img.src = data;
+        img.classList.remove('hidden');
+        document.getElementById(`proof-loading-${item.id}`)?.remove();
+      }
+    } catch {
+      const loading = document.getElementById(`proof-loading-${item.id}`);
+      if (loading) loading.textContent = 'Selfie unavailable.';
+    }
+  }));
+}
 function stopCamera() { state.cameraStream?.getTracks().forEach(track => track.stop()); state.cameraStream = null; }
 async function startCamera() {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera API is unavailable. Use the device camera fallback over HTTPS.');
@@ -558,23 +842,48 @@ async function startCamera() {
   box.querySelector('video').srcObject = stream;
   document.getElementById('camera-snap')?.classList.remove('hidden');
 }
-function snapCamera() {
+function canvasBlob(canvas, quality) {
+  return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Unable to compress this image.')), 'image/jpeg', quality));
+}
+function blobDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Unable to read the compressed image.'));
+    reader.readAsDataURL(blob);
+  });
+}
+async function compressedJpeg(canvas, targetBytes, initialQuality = .78) {
+  let quality = initialQuality, blob;
+  do {
+    blob = await canvasBlob(canvas, quality);
+    quality -= .07;
+  } while (blob.size > targetBytes && quality >= .43);
+  if (blob.size > 750_000) throw new Error('The image is still too large after compression. Try another photo.');
+  return { dataUrl: await blobDataUrl(blob), bytes: blob.size };
+}
+async function snapCamera() {
   const video = document.querySelector('#camera-box video');
   if (!video || !video.videoWidth) throw new Error('Camera is not ready yet.');
-  const canvas = document.createElement('canvas'); canvas.width = 720; canvas.height = Math.round(video.videoHeight * (720 / video.videoWidth));
+  const scale = Math.min(1, 720 / Math.max(video.videoWidth, video.videoHeight));
+  const canvas = document.createElement('canvas'); canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale);
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-  state.capture.selfie = canvas.toDataURL('image/jpeg', .8);
+  const compressed = await compressedJpeg(canvas, 220_000, .78);
+  state.capture.selfie = compressed.dataUrl; state.capture.selfieBytes = compressed.bytes;
   stopCamera(); renderView();
 }
 async function fileSelfie(file) {
   if (!file) return;
-  if (!file.type.startsWith('image/')) throw new Error('Choose an image from the device camera.');
+  if (!file.type.startsWith('image/') || file.size > 15_000_000) throw new Error('Choose an image from the device camera under 15 MB.');
   const bitmap = await createImageBitmap(file);
-  const canvas = document.createElement('canvas');
-  const scale = Math.min(1, 900 / Math.max(bitmap.width, bitmap.height));
-  canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale);
-  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close?.();
-  state.capture.selfie = canvas.toDataURL('image/jpeg', .78);
+  try {
+    const canvas = document.createElement('canvas');
+    const scale = Math.min(1, 900 / Math.max(bitmap.width, bitmap.height));
+    canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const compressed = await compressedJpeg(canvas, 220_000, .78);
+    state.capture.selfie = compressed.dataUrl; state.capture.selfieBytes = compressed.bytes;
+  } finally { bitmap.close?.(); }
   renderView();
 }
 async function logoImages(file) {
@@ -603,22 +912,25 @@ async function profileImageData(file) {
     const context = canvas.getContext('2d');
     context.fillStyle = '#173e50'; context.fillRect(0, 0, 512, 512);
     context.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, 512, 512);
-    return canvas.toDataURL('image/jpeg', .82);
+    return (await compressedJpeg(canvas, 160_000, .8)).dataUrl;
   } finally { bitmap.close?.(); }
 }
 async function submitPunch() {
   const c = state.capture;
   if (!navigator.onLine) throw new Error('Offline. The punch was not saved. Ask admin for a backfill if needed.');
+  if (getTodayPunch('IN') && getTodayPunch('OUT')) throw new Error('Today’s Time In and Time Out are already complete.');
   if (!c?.location || !c.selfie) throw new Error('Selfie and device location are required.');
-  c.location = await geo();
-  renderView();
   c.note = document.getElementById('capture-note')?.value || c.note || '';
+  c.location = await geo();
+  c.method = detectedPunchMethod(c.location, activeExtension());
+  if (c.method === 'OFFSITE' && c.note.trim().length < 3) c.note = 'Offsite location automatically detected';
+  renderView();
   const result = await api('/api/punch', { method: 'POST', body: JSON.stringify({ slot: c.slot, method: c.method,
     latitude: c.location.latitude, longitude: c.location.longitude, accuracyM: c.location.accuracyM,
     selfie: c.selfie, note: c.note }) });
   stopCamera(); state.capture = null;
   await loadEmployee(currentRange()); state.section = 'home'; render();
-  flash(`${result.punch.slot === 'IN' ? 'Time In' : 'Time Out'} saved at ${formatTime(result.punch.timeUtc)}. ${result.punch.verification === 'PENDING' ? 'Pending admin verification.' : 'Onsite verified.'}`, 'success');
+  flash(`${result.punch.slot === 'IN' ? 'Time In' : 'Time Out'} saved at ${formatTime(result.punch.timeUtc)}. Pending admin verification.`, 'success');
 }
 
 function updateOnline() { document.getElementById('offline')?.classList.toggle('hidden', navigator.onLine); }
@@ -626,18 +938,23 @@ function formData(form) { return Object.fromEntries(new FormData(form)); }
 function validateRange(from, to) { if (!from || !to || from > to) throw new Error('Choose a valid date range.'); return { start: from, end: to }; }
 
 document.addEventListener('click', async event => {
+  if (event.target instanceof Element && event.target.classList.contains('modal-backdrop')) return closeModal();
   const node = event.target.closest('[data-nav],[data-action]'); if (!node) return;
   const action = node.dataset.action;
   try {
     if (node.dataset.nav) return await go(node.dataset.nav);
     if (action === 'auth-login' || action === 'auth-signup') { state.authMode = action === 'auth-signup' ? 'signup' : 'login'; state.message = ''; return renderLogin(); }
     if (action === 'logout') { await api('/api/logout', { method: 'POST', body: '{}' }); state.session = null; state.section = 'home'; state.message = ''; await loadSignupStatus(); return render(); }
-    if (action === 'capture-onsite' || action === 'capture-offsite') {
+    if (action === 'capture-auto') {
       if (holidayFor(activeWorkDate(), config().holidays)) throw new Error('No work is scheduled today. Ask admin to record exceptional work.');
-      state.capture = { slot: node.dataset.slot, method: action === 'capture-onsite' ? 'ONSITE' : 'OFFSITE',
-        location: null, selfie: null, note: action === 'capture-offsite' && activeExtension()
-          ? (getTodayPunch('IN')?.note || '') : '' };
-      return go('capture');
+      if (getTodayPunch('IN') && getTodayPunch('OUT')) throw new Error('Today’s Time In and Time Out are already complete.');
+      const location = await geo(), extension = activeExtension();
+      const method = detectedPunchMethod(location, extension);
+      state.capture = { slot: node.dataset.slot, method, location, selfie: null,
+        note: method === 'OFFSITE' ? (getTodayPunch('IN')?.note || 'Offsite location automatically detected') : '' };
+      await go('capture');
+      try { await startCamera(); } catch (error) { flash(`${error.message} Use the device camera button instead.`, 'warn'); }
+      return;
     }
     if (action === 'continue-offsite') {
       if (!navigator.onLine) throw new Error('Connect to the internet before continuing overtime.');
@@ -646,11 +963,16 @@ document.addEventListener('click', async event => {
       await loadEmployee(currentRange()); renderView();
       return flash('Offsite continuation recorded. Time Out with selfie and GPS when finished; extra hours need admin approval.', 'success');
     }
-    if (action === 'arrival-time-in') { const location = state.modal.location; closeModal(); state.capture = { slot: 'IN', method: 'ONSITE', location, selfie: null, note: '' }; return go('capture'); }
+    if (action === 'arrival-time-in') { const location = state.modal.location; closeModal(); state.capture = { slot: 'IN', method: 'ONSITE', location, selfie: null, note: '' }; await go('capture'); return await startCamera(); }
     if (action === 'modal-close') return closeModal();
+    if (action === 'edit-profile') return showModal({ kind: 'edit-profile' });
+    if (action === 'update-app') return showModal({ kind: 'update-app' });
+    if (action === 'site-settings') return showModal({ kind: 'site-settings' });
+    if (action === 'payroll-settings') return showModal({ kind: 'payroll-settings' });
+    if (action === 'records-filter') return showModal({ kind: 'records-filter' });
     if (action === 'location') { state.capture.location = await geo(); return renderView(); }
     if (action === 'camera-start') return await startCamera();
-    if (action === 'camera-snap') return snapCamera();
+    if (action === 'camera-snap') return await snapCamera();
     if (action === 'submit-punch') return await submitPunch();
     if (action === 'cutoff-prev' || action === 'cutoff-next') {
       const range = state.historyRange || currentRange();
@@ -660,29 +982,37 @@ document.addEventListener('click', async event => {
     if (action === 'employee-new') { state.selectedEmployee = null; return renderView(); }
     if (action === 'employee-edit') { state.selectedEmployee = state.employees.find(e => e.id === node.dataset.id); return renderView(); }
     if (action === 'employee-delete') {
-      const employee = state.employees.find(e => e.id === node.dataset.id && e.isDemo);
-      if (employee) showModal({ kind: 'delete-demo', employee });
+      const employee = state.employees.find(e => e.id === node.dataset.id);
+      if (employee) showModal({ kind: 'delete-employee', employee });
       return;
     }
     if (action === 'site-my-location') {
-      const pos = await geo(), form = document.getElementById('settings-form');
-      form.elements.siteLat.value = pos.latitude.toFixed(7); form.elements.siteLng.value = pos.longitude.toFixed(7);
-      return flash(`Current pin filled (GPS accuracy ±${Math.round(pos.accuracyM)} m). Check it before saving.`, 'success');
+      const form = document.getElementById('site-settings-form'), status = document.getElementById('site-location-status');
+      node.disabled = true; node.setAttribute('aria-busy', 'true'); node.innerHTML = '<span class="location-spinner" aria-hidden="true"></span> Locating device…';
+      if (status) { status.className = 'site-location-status locating'; status.querySelector('p').textContent = 'Getting a precise GPS pin. Keep this window open; a second attempt will run automatically if needed.'; }
+      try {
+        const pos = await geo();
+        form.elements.siteLat.value = pos.latitude.toFixed(7); form.elements.siteLng.value = pos.longitude.toFixed(7);
+        if (status) { status.className = 'site-location-status ready'; status.querySelector('p').textContent = `Pin ready · accuracy ±${Math.round(pos.accuracyM)} m. Review the coordinates, then save.`; }
+        return flash(`Current pin filled (GPS accuracy ±${Math.round(pos.accuracyM)} m). Check it before saving.`, 'success');
+      } catch (error) {
+        if (status) { status.className = 'site-location-status blocked'; status.querySelector('p').textContent = `${error.message} Manual coordinate entry remains available above.`; }
+        throw error;
+      } finally {
+        node.disabled = false; node.removeAttribute('aria-busy'); node.innerHTML = '<span aria-hidden="true">◎</span> Try my location again';
+      }
     }
     if (action === 'holiday-remove') {
-      const holidays = config().customHolidays.filter(holiday => holiday.date !== node.dataset.date);
-      await api('/api/admin/holidays', { method: 'PUT', body: JSON.stringify({ holidays }) });
-      await refreshSession(); renderView(); return flash('Holiday removed.', 'success');
+      const holiday = config().customHolidays.find(item => item.date === node.dataset.date);
+      if (holiday) showModal({ kind: 'delete-holiday', holiday });
+      return;
     }
     if (action === 'record-detail') {
       const p = state.adminData.punches.find(item => item.id === node.dataset.id);
       if (p) {
-        showModal({ kind: 'record', punch: p });
-        if (p.hasSelfie) {
-          const data = await client.action(functions.storageActions.selfie, { token: accessToken, id: p.id });
-          const img = document.getElementById('proof-selfie');
-          if (img && state.modal?.punch?.id === p.id) { img.src = data; img.classList.remove('hidden'); img.previousElementSibling?.remove(); }
-        }
+        const punches = state.adminData.punches.filter(item => item.userId === p.userId && item.workDate === p.workDate);
+        showModal({ kind: 'record-day', punches, employeeName: p.employeeName, workDate: p.workDate });
+        await loadProofSelfies(punches);
       }
       return;
     }
@@ -691,34 +1021,74 @@ document.addEventListener('click', async event => {
       if (extension) showModal({ kind: 'premium', extension, stage: node.dataset.stage, decision: node.dataset.decision });
       return;
     }
+    if (action === 'approve-attendance-day') {
+      const punches = state.modal?.kind === 'record-day' ? state.modal.punches : [];
+      const employeeName = state.modal?.kind === 'record-day' ? state.modal.employeeName : 'Employee';
+      showModal({ kind: 'approve-day', userId: node.dataset.userId, workDate: node.dataset.workDate,
+        employeeName, punches });
+      return;
+    }
     if (action === 'verify-approve' || action === 'verify-reject') {
       const verification = action === 'verify-approve' ? 'APPROVED' : 'REJECTED';
       const reason = verification === 'REJECTED' ? window.prompt('Reason for rejection (at least 5 characters):') : '';
       if (verification === 'REJECTED' && reason == null) return;
+      const proofContext = state.modal?.kind === 'record-day'
+        ? { userId: state.modal.punches[0]?.userId, employeeName: state.modal.employeeName, workDate: state.modal.workDate }
+        : null;
       await api(`/api/admin/punches/${node.dataset.id}/verify`, { method: 'POST', body: JSON.stringify({ verification, reason }) });
-      closeModal(); await loadAdmin(state.adminRange || currentRange()); renderView(); return flash(`Offsite punch ${verification.toLowerCase()}.`, 'success');
+      closeModal();
+      await loadAdmin(state.adminRange || currentRange());
+      renderView();
+      if (proofContext?.userId) {
+        const punches = state.adminData.punches.filter(item => item.userId === proofContext.userId && item.workDate === proofContext.workDate);
+        showModal({ kind: 'record-day', punches, employeeName: proofContext.employeeName, workDate: proofContext.workDate });
+        await loadProofSelfies(punches);
+      }
+      return flash(`Punch ${verification.toLowerCase()}.`, 'success');
     }
     if (action === 'print') return window.print();
-    if (action === 'install' && state.installPrompt) { await state.installPrompt.prompt(); state.installPrompt = null; return renderView(); }
+    if (action === 'dismiss-install') { state.installDismissed = true; return render(); }
+    if (action === 'install' && state.installPrompt) {
+      const prompt = state.installPrompt;
+      await prompt.prompt();
+      const choice = await prompt.userChoice;
+      state.installPrompt = null;
+      state.installDismissed = choice.outcome !== 'accepted';
+      return render();
+    }
   } catch (error) { flash(error.message, 'error'); }
 });
 
 document.addEventListener('change', async event => {
   try {
-    if (event.target.id === 'capture-method') { state.capture.method = event.target.value; state.capture.location = null; return renderView(); }
+    if (event.target.id === 'payroll-month') return syncPayrollEditor(true);
+    if (event.target.id === 'cutoff-first-start' || event.target.id === 'cutoff-second-start') return syncPayrollEditor();
     if (event.target.id === 'selfie-file') return await fileSelfie(event.target.files[0]);
     if (event.target.id === 'signup-photo') {
       state.signupPhoto = await profileImageData(event.target.files[0]);
       const preview = document.getElementById('signup-photo-preview');
       if (preview) { preview.src = state.signupPhoto; preview.classList.remove('hidden'); }
     }
+    if (event.target.id === 'profile-photo' && event.target.files[0]) {
+      const preview = document.getElementById('profile-photo-preview');
+      if (preview) preview.innerHTML = `<img src="${URL.createObjectURL(event.target.files[0])}" alt="New profile photo preview">`;
+    }
+    if (event.target.id === 'app-brand-logo' && event.target.files[0]) {
+      const preview = document.getElementById('brand-preview');
+      if (preview) preview.innerHTML = `<img class="brand-preview-image" src="${URL.createObjectURL(event.target.files[0])}" alt="New app logo preview"><strong>${h(document.getElementById('app-brand-name')?.value || state.branding.appName)}</strong>`;
+    }
   } catch (error) { flash(error.message, 'error'); }
 });
 document.addEventListener('input', event => {
+  if (event.target.id === 'cutoff-first-start' || event.target.id === 'cutoff-second-start') syncPayrollEditor();
   if (event.target.id === 'capture-note' && state.capture) {
     state.capture.note = event.target.value;
     const button = document.querySelector('[data-action="submit-punch"]');
-    if (button) button.disabled = !state.capture.location || !state.capture.selfie || state.capture.note.trim().length < 3;
+    if (button) button.disabled = !state.capture.location || !state.capture.selfie || state.capture.location.accuracyM > config().maxAccuracyM;
+  }
+  if (event.target.id === 'app-brand-name') {
+    const label = document.querySelector('#brand-preview span:last-child, #brand-preview strong');
+    if (label) label.textContent = event.target.value || 'App name';
   }
 });
 
@@ -727,7 +1097,7 @@ document.addEventListener('submit', async event => {
   const submit = form.querySelector('[type="submit"]'); if (submit) submit.disabled = true;
   try {
     if (id === 'login-form') {
-      await api('/api/login', { method: 'POST', body: JSON.stringify({ email: values.email, password: values.password, remember: !!values.remember }) });
+      await api('/api/login', { method: 'POST', body: JSON.stringify({ identifier: values.identifier, password: values.password, remember: !!values.remember }) });
       await refreshSession(); state.section = state.session.user.role === 'admin' ? 'dashboard' : 'home';
       await go(state.section); return;
     }
@@ -738,13 +1108,13 @@ document.addEventListener('submit', async event => {
       state.signupPhoto = null; state.signupAvailable = false;
       await refreshSession(); await go('dashboard'); return flash('Admin account created.', 'success');
     }
-    if (id === 'password-form') { await api('/api/password', { method: 'POST', body: JSON.stringify(values) }); form.reset(); return flash('Password updated.', 'success'); }
+    if (id === 'password-form') { await api('/api/password', { method: 'POST', body: JSON.stringify(values) }); closeModal(); render(); return flash('Password updated.', 'success'); }
     if (id === 'profile-photo-form') {
       const file = form.querySelector('#profile-photo').files[0], remove = !!values.removePhoto;
       if ((file && remove) || (!file && !remove)) throw new Error('Choose a new picture or remove the current one.');
       await api('/api/admin/profile-photo', { method: 'POST', body: JSON.stringify({ remove,
         ...(file ? { profileImage: await profileImageData(file) } : {}) }) });
-      await refreshSession(); render(); return flash('Profile picture updated.', 'success');
+      await refreshSession(); closeModal(); render(); return flash('Profile picture updated.', 'success');
     }
     if (id === 'delete-account-form') {
       await api('/api/admin/account', { method: 'DELETE', body: JSON.stringify({ password: values.password, confirmation: values.confirmation }) });
@@ -753,22 +1123,50 @@ document.addEventListener('submit', async event => {
       return flash('Admin account deleted. A new admin can now sign up.', 'success');
     }
     if (id === 'history-form') { state.historyRange = validateRange(values.from, values.to); await loadEmployee(state.historyRange); return renderView(); }
-    if (id === 'records-filter') { state.adminRange = validateRange(values.from, values.to); await loadAdmin(state.adminRange, values.employeeId || null); return renderView(); }
-    if (id === 'report-filter') { state.reportRange = validateRange(values.from, values.to); state.includeDemoReport = !!values.includeDemo; await loadAdmin(state.reportRange); return renderView(); }
-    if (id === 'delete-demo-form') {
+    if (id === 'records-filter') { state.adminRange = validateRange(values.from, values.to); await loadAdmin(state.adminRange); closeModal(); return renderView(); }
+    if (id === 'report-filter') { state.reportRange = validateRange(values.from, values.to); await loadAdmin(state.reportRange); return renderView(); }
+    if (id === 'delete-employee-form') {
       if (values.confirmation !== 'DELETE') throw new Error('Type DELETE to confirm.');
       await api(`/api/admin/employees/${values.id}`, { method: 'DELETE' });
       closeModal(); state.selectedEmployee = null; await loadEmployees(); await loadAdmin(state.adminRange || currentRange());
-      renderView(); return flash('Demo account and test records deleted.', 'success');
+      renderView(); return flash('Employee account and related records deleted.', 'success');
+    }
+    if (id === 'delete-holiday-form') {
+      const holidays = config().customHolidays.filter(holiday => holiday.date !== values.date);
+      await api('/api/admin/holidays', { method: 'PUT', body: JSON.stringify({ holidays }) });
+      await refreshSession(); closeModal(); renderView(); return flash('Holiday removed.', 'success');
+    }
+    if (id === 'approve-day-form') {
+      const pending = state.modal;
+      if (pending?.kind !== 'approve-day') throw new Error('Attendance approval expired. Open the daily review again.');
+      await api('/api/admin/attendance/day/approve', { method: 'POST', body: JSON.stringify({
+        userId: pending.userId, workDate: pending.workDate
+      }) });
+      const context = { userId: pending.userId, workDate: pending.workDate, employeeName: pending.employeeName };
+      closeModal();
+      await loadAdmin(state.adminRange || currentRange());
+      renderView();
+      const punches = state.adminData.punches.filter(item => item.userId === context.userId && item.workDate === context.workDate);
+      showModal({ kind: 'record-day', punches, employeeName: context.employeeName, workDate: context.workDate });
+      await loadProofSelfies(punches);
+      return flash('Daily attendance approved and included in payroll.', 'success');
     }
     if (id === 'premium-review-form') {
       await api(`/api/admin/extensions/${values.id}/review`, { method: 'POST', body: JSON.stringify(values) });
       closeModal(); await loadAdmin(state.adminRange || currentRange()); renderView();
-      return flash(`${values.stage === 'OVERTIME' ? 'Overtime' : 'Night differential'} ${values.decision === 'APPROVED' ? 'granted' : 'denied'}.`, 'success');
+      return flash(`${values.stage === 'OVERTIME' ? 'Overtime' : 'Differential'} ${values.decision === 'APPROVED' ? 'granted' : 'denied'}.`, 'success');
     }
-    if (id === 'settings-form') {
-      const input = { siteName: values.siteName, siteLat: Number(values.siteLat), siteLng: Number(values.siteLng), radiusM: Number(values.radiusM), maxAccuracyM: Number(values.maxAccuracyM), cutoffDays: [Number(values.cutoffA), Number(values.cutoffB)] };
-      await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(input) }); await refreshSession(); render(); return flash('Site and cutoff settings saved.', 'success');
+    if (id === 'site-settings-form') {
+      const input = { siteName: values.siteName, siteLat: Number(values.siteLat), siteLng: Number(values.siteLng), radiusM: Number(values.radiusM), maxAccuracyM: Number(values.maxAccuracyM), cutoffDays: config().cutoffDays };
+      await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(input) }); await refreshSession(); closeModal(); render(); return flash('Site GPS settings saved.', 'success');
+    }
+    if (id === 'payroll-settings-form') {
+      if (!values.firstStart.startsWith(`${values.payrollMonth}-`) || !values.secondStart.startsWith(`${values.payrollMonth}-`)) throw new Error('Both cutoff dates must be inside the selected month.');
+      if (values.firstStart >= values.secondStart) throw new Error('The first cutoff must start before the second cutoff.');
+      const cutoffDays = [Number(values.firstStart.slice(8)), Number(values.secondStart.slice(8))];
+      if (cutoffDays.some(day => day > 28)) throw new Error('Choose cutoff start dates from day 1 through 28 so every month stays valid.');
+      const s = config(), input = { siteName: s.siteName, siteLat: s.siteLat, siteLng: s.siteLng, radiusM: s.radiusM, maxAccuracyM: s.maxAccuracyM, cutoffDays };
+      await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(input) }); await refreshSession(); closeModal(); render(); return flash('Payroll cutoff saved and synced to the calendar.', 'success');
     }
     if (id === 'holiday-form') {
       const holidays = [...config().customHolidays, { date: values.date, name: values.name.trim() }];
@@ -780,29 +1178,46 @@ document.addEventListener('submit', async event => {
       if (file && values.removeLogo) throw new Error('Choose a new logo or remove the current one.');
       const images = file ? await logoImages(file) : {};
       await api('/api/admin/branding', { method: 'POST', body: JSON.stringify({ appName: values.appName, ...images, removeLogo: !!values.removeLogo }) });
-      await loadBranding(); await refreshSession(); render(); return flash('App name and logo saved.', 'success');
+      await loadBranding(); await refreshSession(); closeModal(); render(); return flash('App name and logo saved.', 'success');
     }
     if (id === 'employee-form') {
-      const input = { name: values.name, email: values.email, password: values.password, scheduleStart: '08:00', scheduleEnd: '17:00',
-        workdays: [...form.querySelectorAll('input[name="day"]:checked')].map(el => Number(el.value)), active: !!values.active, isDemo: !!values.isDemo };
+      const input = { name: values.name, mobile: values.mobile, password: values.password, scheduleStart: '08:00', scheduleEnd: '17:00',
+        workdays: [...form.querySelectorAll('input[name="day"]:checked')].map(el => Number(el.value)), active: !!values.active };
       const editing = !!values.id;
-      await api(editing ? `/api/admin/employees/${values.id}` : '/api/admin/employees', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(input) });
-      state.selectedEmployee = null; await loadEmployees(); renderView(); return flash(editing ? 'Employee updated.' : 'Employee account created.', 'success');
+      showModal({ kind: 'employee-confirm', input, employeeId: values.id || null, editing }); return;
+    }
+    if (id === 'employee-confirm-form') {
+      const pending = state.modal;
+      if (pending?.kind !== 'employee-confirm') throw new Error('Employee review expired. Please review the form again.');
+      const { input, employeeId, editing } = pending;
+      await api(editing ? `/api/admin/employees/${employeeId}` : '/api/admin/employees', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(input) });
+      closeModal(); state.selectedEmployee = null; await loadEmployees(); renderView(); return flash(editing ? 'Employee updated successfully.' : 'Employee account created successfully.', 'success');
     }
     if (id === 'backfill-form') {
       const input = { employeeId: values.employeeId, workDate: values.workDate, timeIn: values.timeIn || null, timeOut: values.timeOut || null,
         timeOutNextDay: !!values.timeOutNextDay, offsite: !!values.offsite,
         reason: values.reason, replaceExisting: !!values.replaceExisting };
-      await api('/api/admin/attendance', { method: 'POST', body: JSON.stringify(input) });
-      state.adminRange = { start: values.workDate, end: values.workDate };
-      await go('records'); return flash('Admin-created attendance saved. Review any extra hours below.', 'success');
+      const employeeName = state.employees.find(employee => employee.id === input.employeeId)?.name || 'Selected employee';
+      showModal({ kind: 'attendance-confirm', input, employeeName }); return;
+    }
+    if (id === 'attendance-confirm-form') {
+      const pending = state.modal;
+      if (pending?.kind !== 'attendance-confirm') throw new Error('Attendance review expired. Please review the form again.');
+      const { input } = pending;
+      const result = await api('/api/admin/attendance', { method: 'POST', body: JSON.stringify(input) });
+      closeModal(); state.adminRange = { start: input.workDate, end: input.workDate };
+      await go('records'); return flash(result.replaced
+        ? `${result.replaced} existing same-day ${result.replaced === 1 ? 'punch was' : 'punches were'} replaced. The correction is now active.`
+        : 'Admin-created attendance saved. Review any extra hours below.', 'success');
     }
   } catch (error) { flash(error.message, 'error'); }
   finally { if (submit?.isConnected) submit.disabled = false; }
 });
 
 window.addEventListener('online', updateOnline); window.addEventListener('offline', updateOnline);
-window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); state.installPrompt = event; });
+window.addEventListener('keydown', event => { if (event.key === 'Escape' && state.modal) closeModal(); });
+window.addEventListener('beforeinstallprompt', event => { event.preventDefault(); state.installPrompt = event; if (!appInstalled()) render(); });
+window.addEventListener('appinstalled', () => { state.installPrompt = null; state.installDismissed = true; render(); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
 async function resumeAttendance() {
@@ -818,8 +1233,11 @@ document.addEventListener('visibilitychange', () => {
 setInterval(() => {
   if (!state.session || document.visibilityState !== 'visible') return;
   if (new Date().toLocaleDateString('en-CA', { timeZone }) !== today()) void resumeAttendance();
-  else if (state.session.user.role === 'employee' && state.section === 'home' &&
-           activeExtension() && !getTodayPunch('OUT')) renderView();
+  else if (state.session.user.role === 'employee' && state.section === 'home') {
+    if (activeExtension() && !getTodayPunch('OUT')) renderView();
+  }
+  else if (state.session.user.role === 'admin' && state.section === 'dashboard')
+    void loadAdmin(currentRange(), null, false).then(renderView).catch(error => flash(error.message, 'error'));
 }, 60000);
 
 await loadBranding();

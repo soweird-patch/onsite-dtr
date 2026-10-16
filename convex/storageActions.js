@@ -5,9 +5,9 @@ import { v } from 'convex/values';
 export const punch = action({ args: { token: v.string(), input: v.any() }, handler: async (ctx, { token, input }) => {
   await ctx.runQuery(internal.core.userForToken, { token, role: 'employee' });
   const match = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(input.selfie || '');
-  if (!match || match[2].length > 4_000_000) throw new Error('A selfie photo is required (maximum 3 MB).');
+  if (!match || match[2].length > 1_050_000) throw new Error('A compressed selfie photo is required (maximum 750 KB).');
   const binary = atob(match[2]);
-  if (binary.length < 1000 || binary.length > 3_000_000) throw new Error('Selfie must be 1 KB–3 MB.');
+  if (binary.length < 1000 || binary.length > 750_000) throw new Error('Selfie must be 1 KB–750 KB.');
   const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
   const type = `image/${match[1]}`;
   const selfieId = await ctx.storage.store(new Blob([bytes], { type }));

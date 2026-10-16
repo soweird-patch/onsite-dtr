@@ -70,14 +70,14 @@ Create/edit/disable employee; assign employee ID, schedule, at initial login ins
 ### D. Admin-created attendance / no-internet backfill
 
 1. Piliin ang employee at work date, ilagay ang AM In at/o PM Out, at **required reason** (hal. no signal sa field). Ang source ay laging **Created by admin** para hindi magmukhang GPS-verified employee punch.
-2. Para sa offsite backfill, ilagay ang aktuwal na In/Out at piliin kung next day ang Out. Awtomatikong iko-compute ang eligible overtime at night differential; hiwalay na aaprubahan ng admin. Hindi kailangan ng selfie/location para sa admin-created event.
+2. Para sa offsite backfill, ilagay ang aktuwal na In/Out at piliin kung next day ang Out. Awtomatikong iko-compute ang eligible overtime at Differential; hiwalay na aaprubahan ng admin. Hindi kailangan ng selfie/location para sa admin-created event.
 3. Malinaw na label: **Created by admin** sa employee view, admin list, at print/export. Itala ang creator, oras ng pag-create, reason, at history ng anumang edit.
 4. Kung may original employee punch sa parehong slot, huwag i-overwrite. Gumawa ng documented correction/replacement na may original record retained.
 
 ### E. Cutoff review at payroll print
 
 1. Piliin ang cutoff at employee/all employees. Ipakita ang incomplete, pending verification, rejected, at admin-created exceptions bago i-finalize.
-2. Payroll report: app/header, cutoff date span, print date, employee name, per-day actual In/Out source/time, regular hours, late, undertime, granted overtime, granted night differential, at review status. May totals bawat employee.
+2. Payroll report: app/header, cutoff date span, print date, employee name, per-day actual In/Out source/time, regular hours, late, undertime, granted overtime, Differential, at review status. May totals bawat employee.
 3. Print-friendly view na maaaring i-save bilang PDF gamit ang browser print dialog. Nasa record detail ang selfie/map proof; hindi ito isinasama sa regular payroll summary.
 4. Kapag na-finalize ang cutoff, lock ang edits sa ordinary flow; admin correction lamang na may audit trail at regenerated report version.
 
@@ -95,7 +95,7 @@ Create/edit/disable employee; assign employee ID, schedule, at initial login ins
 | Admin backfill | **Created by admin**, may required reason; walang selfie requirement. |
 | Duplicate tap / retry | Isang active punch bawat employee, work date, at slot; nirereject ang duplicate at puwedeng tingnan ang existing receipt sa history. |
 
-Ang oras sa regular, overtime, at night windows ay nasa [premium workflow](PREMIUM_FLOW.md). Kasama sa "Incoming Holidays" ng admin at employee ang published nationwide holidays sa 2026–2027. Ang regular at special non-working days ay no-work; ang special working day ay normal na scheduled day. Ang admin ay puwedeng magdagdag ng local/company holidays. Hindi bibilangin ang no-work day bilang missing attendance o late/undertime. Ang bagong proclamation, kasama ang 2027 Eid dates, ay nangangailangan ng calendar update. Hindi magko-compute ng sahod, pay rate, leave, holiday pay, o deduction ang DTR.
+Ang oras sa regular, overtime, at Differential windows ay nasa [premium workflow](PREMIUM_FLOW.md). Kasama sa "Incoming Holidays" ng admin at employee ang published nationwide holidays sa 2026–2027. Ang regular at special non-working days ay no-work; ang special working day ay normal na scheduled day. Ang admin ay puwedeng magdagdag ng local/company holidays. Hindi bibilangin ang no-work day bilang missing attendance o late/undertime. Ang bagong proclamation, kasama ang 2027 Eid dates, ay nangangailangan ng calendar update. Hindi magko-compute ng sahod, pay rate, leave, holiday pay, o deduction ang DTR.
 
 ## 6. Data na dapat itago
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { autoTimeOut, backfill, continueOffsite, reviewExtension, verify } from '../convex/core.js';
+import { approveAttendanceDay, autoTimeOut, backfill, continueOffsite, reviewExtension, verify } from '../convex/core.js';
 import { shiftInstant } from '../rules.js';
 
 function fixture() {
@@ -61,7 +61,26 @@ test('admin separately grants overtime and night hours, with denial cascading', 
   await review('OVERTIME', 'APPROVED');
   await verify._handler(f.ctx, { token: f.token, id: outId, verification: 'REJECTED', reason: 'No valid proof' });
   assert.equal((await f.ctx.db.get(extensionId)).overtimeDecision, 'REJECTED');
-  await assert.rejects(review('OVERTIME', 'APPROVED'), /Approve the offsite/);
+  await assert.rejects(review('OVERTIME', 'APPROVED'), /Approve the employee/);
+});
+
+test('admin approves Time In and Time Out together for daily payroll', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  const inId = await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'IN', method: 'ONSITE',
+    timeUtc: shiftInstant(date, '08:00'), verification: 'PENDING', active: true });
+  const outId = await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'OUT', method: 'ONSITE',
+    timeUtc: shiftInstant(date, '17:00'), verification: 'PENDING', active: true });
+  await approveAttendanceDay._handler(f.ctx, { token: f.token, userId, workDate: date });
+  assert.equal((await f.ctx.db.get(inId)).verification, 'APPROVED');
+  assert.equal((await f.ctx.db.get(outId)).verification, 'APPROVED');
+  assert.equal((await f.ctx.db.get(inId)).reviewedBy, adminId);
+  const nextDate = '2026-10-16';
+  await f.ctx.db.insert('punches', { userId, workDate: nextDate, slot: 'IN', method: 'ONSITE',
+    timeUtc: shiftInstant(nextDate, '08:00'), verification: 'PENDING', active: true });
+  await assert.rejects(approveAttendanceDay._handler(f.ctx,
+    { token: f.token, userId, workDate: nextDate }), /Both Time In and Time Out/);
 });
 
 test('admin-created offsite shift generates reviewable extra hours and next-day cutoff', async () => {
@@ -81,6 +100,25 @@ test('admin-created offsite shift generates reviewable extra hours and next-day 
   await assert.rejects(backfill._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: '2026-10-16',
     timeIn: '08:00', timeOut: '06:01', timeOutNextDay: true, offsite: true,
     reason: 'Invalid overnight time' } }), /no later than 6:00 AM/);
+});
+
+test('replace existing overwrites matching same-day punches and preserves audit history', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  const input = { employeeId: userId, workDate: date, timeIn: '08:00', timeOut: '17:00',
+    offsite: false, reason: 'Initial admin attendance' };
+  await backfill._handler(f.ctx, { token: f.token, input });
+  await assert.rejects(backfill._handler(f.ctx, { token: f.token, input: { ...input, timeIn: '09:00' } }),
+    /already exists for this workday/);
+  await backfill._handler(f.ctx, { token: f.token, input: { ...input, timeIn: '09:00', timeOut: '18:00',
+    replaceExisting: true, reason: 'Corrected signed timesheet' } });
+  const punches = [...f.tables.punches.values()];
+  assert.equal(punches.filter(row => row.active).length, 2);
+  assert.equal(punches.filter(row => !row.active).length, 2);
+  assert.equal(punches.find(row => row.active && row.slot === 'IN').timeUtc, shiftInstant(date, '09:00'));
+  assert.equal(punches.find(row => row.active && row.slot === 'OUT').timeUtc, shiftInstant(date, '18:00'));
+  assert.equal([...f.tables.audit.values()].filter(row => row.action === 'punch_replaced').length, 2);
 });
 
 test('system auto-closes an open continued shift at 6 AM exactly once', async () => {

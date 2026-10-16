@@ -5,7 +5,6 @@ data/
 .qa-data/
 dist/
 node_modules/
-public/
 server.js
 tests/
 scripts/

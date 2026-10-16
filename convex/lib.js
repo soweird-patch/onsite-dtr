@@ -25,7 +25,7 @@ export function settingsView(row) {
 }
 
 export function userView(row) {
-  return { id: row._id, name: row.name, email: row.email, role: row.role, isDemo: !!row.isDemo,
+  return { id: row._id, name: row.name, email: row.email ?? null, mobile: row.mobile ?? null, role: row.role,
     active: row.active, scheduleStart: '08:00', scheduleEnd: '17:00',
     workdays: row.workdays };
 }
@@ -67,12 +67,13 @@ export function validEmail(email) {
 export function validateEmployee(input, creating) {
   if (typeof input.name !== 'string' || input.name.trim().length < 2 || input.name.length > 120)
     throw new Error('Employee name must have 2–120 characters.');
-  if (!validEmail(input.email)) throw new Error('Valid email is required.');
+  if (typeof input.mobile !== 'string' || !/^\d{11}$/.test(input.mobile))
+    throw new Error('Employee mobile number must contain exactly 11 digits.');
   if (creating && (!input.passwordHash || typeof input.passwordHash !== 'string'))
     throw new Error('Temporary password is required.');
   clockMinutes(input.scheduleStart); clockMinutes(input.scheduleEnd);
   if (input.scheduleStart !== '08:00' || input.scheduleEnd !== '17:00')
-    throw new Error('Regular time is fixed at 8:00 AM–5:00 PM, including break.');
+    throw new Error('The regular schedule is fixed at 8:00 AM–5:00 PM: 8 regular hours, with 12:00–1:00 PM included.');
   if (!Array.isArray(input.workdays) || !input.workdays.length ||
       input.workdays.some(n => !Number.isInteger(n) || n < 0 || n > 6))
     throw new Error('Choose valid workdays.');

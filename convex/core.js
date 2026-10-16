@@ -11,6 +11,9 @@ const tokenArg = { token: v.string() };
 async function userByEmail(ctx, email) {
   return ctx.db.query('users').withIndex('by_email', q => q.eq('email', email)).unique();
 }
+async function userByMobile(ctx, mobile) {
+  return ctx.db.query('users').withIndex('by_mobile', q => q.eq('mobile', mobile)).unique();
+}
 async function punchFor(ctx, userId, date, slot) {
   const rows = await ctx.db.query('punches').withIndex('by_user_date', q => q.eq('userId', userId).eq('workDate', date)).collect();
   return rows.find(p => p.slot === slot && p.active);
@@ -118,16 +121,18 @@ export const auditItems = query({ args: tokenArg, handler: async (ctx, { token }
 
 export const updateSettings = mutation({ args: { ...tokenArg, input: v.any() }, handler: async (ctx, { token, input }) => {
   const admin = await authUser(ctx, token, 'admin');
+  const hasSitePin = input.siteLat != null || input.siteLng != null;
   const lat = Number(input.siteLat), lng = Number(input.siteLng), radius = Number(input.radiusM), accuracy = Number(input.maxAccuracyM);
   const days = input.cutoffDays;
   if (typeof input.siteName !== 'string' || !input.siteName.trim() || input.siteName.length > 120) throw new Error('Site name is required.');
-  if (input.siteLat == null || input.siteLng == null || !Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lng) || Math.abs(lng) > 180) throw new Error('Valid site GPS coordinates are required.');
+  if (hasSitePin && (input.siteLat == null || input.siteLng == null || !Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lng) || Math.abs(lng) > 180)) throw new Error('Valid site GPS coordinates are required.');
   if (!Number.isInteger(radius) || radius < 25 || radius > 2000) throw new Error('Site radius must be 25–2000 m.');
   if (!Number.isInteger(accuracy) || accuracy < 10 || accuracy > 500) throw new Error('Maximum accuracy must be 10–500 m.');
   if (!Array.isArray(days) || days.length !== 2 || days.some(n => !Number.isInteger(n) || n < 1 || n > 28) || days[0] === days[1]) throw new Error('Use two different cutoff start days (1–28).');
   const old = await settings(ctx);
-  const changes = { siteName: input.siteName.trim(), siteLat: lat, siteLng: lng, radiusM: radius,
-    maxAccuracyM: accuracy, cutoffDays: [...days].sort((a,b) => a-b), siteVersion: old.siteVersion + 1, updatedAt: now() };
+  const siteChanged = hasSitePin && (old.siteLat !== lat || old.siteLng !== lng || old.radiusM !== radius || old.maxAccuracyM !== accuracy || old.siteName !== input.siteName.trim());
+  const changes = { siteName: input.siteName.trim(), ...(hasSitePin ? { siteLat: lat, siteLng: lng } : {}), radiusM: radius,
+    maxAccuracyM: accuracy, cutoffDays: [...days].sort((a,b) => a-b), siteVersion: siteChanged ? old.siteVersion + 1 : old.siteVersion, updatedAt: now() };
   const next = { ...old, ...changes };
   if (old._id) await ctx.db.patch(old._id, changes); else await ctx.db.insert('settings', next);
   await audit(ctx, admin._id, 'settings_update', 'settings', 'main', { before: settingsView(old), after: settingsView(next) });
@@ -217,7 +222,7 @@ export const autoTimeOut = internalMutation({ args: { userId: v.id('users'), wor
 
 export const submitPunch = internalMutation({ args: { ...tokenArg, input: v.any(), selfieId: v.id('_storage') }, handler: async (ctx, { token, input, selfieId }) => {
   const user = await authUser(ctx, token, 'employee');
-  if (!['IN', 'OUT'].includes(input.slot) || !['ONSITE', 'OFFSITE'].includes(input.method)) throw new Error('Choose a valid punch.');
+  if (!['IN', 'OUT'].includes(input.slot)) throw new Error('Choose a valid punch.');
   const latitude = Number(input.latitude), longitude = Number(input.longitude), accuracy = Number(input.accuracyM);
   if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180 || !Number.isFinite(accuracy) || accuracy < 0) throw new Error('Current device location is required.');
   const config = await settings(ctx);
@@ -231,28 +236,25 @@ export const submitPunch = internalMutation({ args: { ...tokenArg, input: v.any(
   const holiday = holidayFor(workDate, settingsView(config).holidays);
   if (holiday) throw new Error(`No scheduled work today: ${holiday.name}. Ask admin to record exceptional work.`);
   if (accuracy > config.maxAccuracyM) throw new Error(`Location accuracy must be ${config.maxAccuracyM} m or better. Please retry outdoors.`);
-  let distance;
-  if (input.method === 'ONSITE') {
-    if (config.siteLat === undefined || config.siteLng === undefined) throw new Error('Admin has not set the site GPS pin yet.');
-    distance = distanceMeters(latitude, longitude, config.siteLat, config.siteLng);
-    if (distance > config.radiusM) throw new Error(`Outside the onsite radius (${Math.round(distance)} m away). Use Offsite DTR.`);
-  } else if (String(input.note || '').trim().length < 3) throw new Error('Enter the offsite work location or assignment.');
+  const distance = config.siteLat === undefined || config.siteLng === undefined
+    ? undefined : distanceMeters(latitude, longitude, config.siteLat, config.siteLng);
   const meta = await ctx.db.system.get(selfieId);
-  if (!meta || !['image/jpeg', 'image/png', 'image/webp'].includes(meta.contentType) || meta.size < 1000 || meta.size > 3_000_000)
-    throw new Error('A selfie photo of 1 KB–3 MB is required.');
+  if (!meta || !['image/jpeg', 'image/png', 'image/webp'].includes(meta.contentType) || meta.size < 1000 || meta.size > 750_000)
+    throw new Error('A compressed selfie photo of 1 KB–750 KB is required.');
   if (await punchFor(ctx, user._id, workDate, input.slot)) throw new Error('This punch is already recorded.');
   const inPunch = await punchFor(ctx, user._id, workDate, 'IN');
   if (input.slot === 'OUT' && !inPunch) throw new Error('Time In is required before Time Out. Ask admin for a correction.');
   const extension = input.slot === 'OUT' ? await extensionFor(ctx, user._id, workDate) : null;
-  if (extension && input.method !== 'OFFSITE') throw new Error('Continued offsite work needs an offsite Time Out.');
+  const method = extension ? 'OFFSITE' : distance !== undefined && distance <= config.radiusM ? 'ONSITE' : 'OFFSITE';
+  const note = String(input.note || '').trim().slice(0, 300) || (method === 'OFFSITE' ? 'Offsite location automatically detected' : '');
   const time = now();
   if (input.slot === 'OUT' && time <= inPunch.timeUtc) throw new Error('Time Out must be after Time In.');
-  const id = await ctx.db.insert('punches', { userId: user._id, workDate, slot: input.slot, method: input.method,
+  const id = await ctx.db.insert('punches', { userId: user._id, workDate, slot: input.slot, method,
     timeUtc: time, submittedAt: time, latitude, longitude, accuracyM: accuracy,
     ...(distance === undefined ? {} : { distanceM: distance }), selfieId,
-    note: String(input.note || '').trim().slice(0, 300), verification: input.method === 'ONSITE' ? 'APPROVED' : 'PENDING',
+    note, verification: 'PENDING',
     siteVersion: config.siteVersion, active: true });
-  await audit(ctx, user._id, 'punch', 'punch', id, { slot: input.slot, method: input.method });
+  await audit(ctx, user._id, 'punch', 'punch', id, { slot: input.slot, method, distanceM: distance });
   return { punch: punchView(await ctx.db.get(id), user.name) };
 }});
 
@@ -282,12 +284,14 @@ export const backfill = mutation({ args: { ...tokenArg, input: v.any() }, handle
   if (finalIn && finalOut && finalOut <= finalIn) throw new Error('Time Out must be after Time In.');
   if (finalOut && finalOut > shiftInstant(input.workDate, '06:00', true))
     throw new Error('Time Out cannot exceed the 6:00 AM next-day cutoff.');
+  let replaced = 0;
   for (const entry of entries) {
     const old = entry.slot === 'IN' ? oldIn : oldOut;
-    if (old && !input.replaceExisting) throw new Error(`${entry.slot} exists. Tick Replace existing to preserve it and create a correction.`);
+    if (old && !input.replaceExisting) throw new Error(`${entry.slot === 'IN' ? 'Time In' : 'Time Out'} already exists for this workday. Select overwrite to replace it with an audited correction.`);
     if (old) {
       await ctx.db.patch(old._id, { active: false });
       await audit(ctx, admin._id, 'punch_replaced', 'punch', old._id, { reason, replacementTime: entry.time });
+      replaced++;
     }
     const id = await ctx.db.insert('punches', { userId: target._id, workDate: input.workDate, slot: entry.slot,
       method: 'ADMIN', timeUtc: entry.time, submittedAt: now(), note: reason, verification: 'APPROVED',
@@ -313,7 +317,7 @@ export const backfill = mutation({ args: { ...tokenArg, input: v.any() }, handle
       nightReviewedAt: undefined, overtimeReviewedBy: undefined, nightReviewedBy: undefined });
     await audit(ctx, admin._id, 'extension_reset_after_correction', 'extension', extension._id, { reason });
   }
-  return { ok: true };
+  return { ok: true, replaced };
 }});
 
 export const verify = mutation({ args: { ...tokenArg, id: v.string(), verification: v.string(), reason: v.optional(v.string()) }, handler: async (ctx, args) => {
@@ -324,7 +328,7 @@ export const verify = mutation({ args: { ...tokenArg, id: v.string(), verificati
   const id = ctx.db.normalizeId('punches', args.id);
   const punch = id && await ctx.db.get(id);
   if (!punch?.active) throw new Error('Punch not found.');
-  if (punch.method !== 'OFFSITE') throw new Error('Only offsite punches need verification.');
+  if (!['ONSITE', 'OFFSITE'].includes(punch.method)) throw new Error('Only employee-submitted punches need verification.');
   await ctx.db.patch(id, { verification: args.verification, rejectionReason: args.verification === 'REJECTED' ? reason : undefined,
     reviewedBy: admin._id, reviewedAt: now() });
   if (args.verification === 'REJECTED') {
@@ -334,9 +338,33 @@ export const verify = mutation({ args: { ...tokenArg, id: v.string(), verificati
       overtimeReviewedBy: admin._id, nightReviewedBy: admin._id,
       overtimeReviewedAt: now(), nightReviewedAt: now() });
   }
-  await audit(ctx, admin._id, 'offsite_verify', 'punch', id, { verification: args.verification, reason });
+  await audit(ctx, admin._id, 'punch_verify', 'punch', id, { verification: args.verification, reason });
   return { ok: true };
 }});
+
+export const approveAttendanceDay = mutation({
+  args: { ...tokenArg, userId: v.string(), workDate: v.string() },
+  handler: async (ctx, args) => {
+    const admin = await authUser(ctx, args.token, 'admin');
+    const userId = ctx.db.normalizeId('users', args.userId);
+    if (!userId || !safeDate(args.workDate)) throw new Error('Invalid employee or work date.');
+    const employee = await ctx.db.get(userId);
+    if (!employee || employee.role !== 'employee') throw new Error('Employee not found.');
+    const inPunch = await punchFor(ctx, userId, args.workDate, 'IN');
+    const outPunch = await punchFor(ctx, userId, args.workDate, 'OUT');
+    if (!inPunch || !outPunch) throw new Error('Both Time In and Time Out are required before approval.');
+    const reviewedAt = now();
+    for (const punch of [inPunch, outPunch]) {
+      if (['ONSITE', 'OFFSITE'].includes(punch.method)) {
+        await ctx.db.patch(punch._id, { verification: 'APPROVED', rejectionReason: undefined,
+          reviewedBy: admin._id, reviewedAt });
+      }
+    }
+    await audit(ctx, admin._id, 'attendance_day_approve', 'attendance_day', `${userId}|${args.workDate}`,
+      { userId, workDate: args.workDate, punchIds: [inPunch._id, outPunch._id] });
+    return { ok: true, workDate: args.workDate };
+  }
+});
 
 export const reviewExtension = mutation({ args: { ...tokenArg, id: v.string(), stage: v.string(), decision: v.string(), reason: v.optional(v.string()) },
   handler: async (ctx, args) => {
@@ -352,14 +380,14 @@ export const reviewExtension = mutation({ args: { ...tokenArg, id: v.string(), s
     if (!inPunch || !outPunch) throw new Error('Wait for Time Out before reviewing extra hours.');
     const breakdown = workBreakdown(extension.workDate, inPunch.timeUtc, outPunch.timeUtc, extension.continuedAt);
     if (args.stage === 'OVERTIME' && !breakdown.overtimeEligible)
-      throw new Error('Overtime needs at least 60 minutes between 5:00 PM and 10:00 PM.');
+      throw new Error('Overtime starts after 8 paid regular hours and needs at least 60 extra minutes.');
     if (args.stage === 'NIGHT' && !breakdown.nightCandidateMinutes)
-      throw new Error('No night differential was recorded.');
+      throw new Error('No Differential hours were recorded.');
     if (args.stage === 'NIGHT' && extension.overtimeDecision !== 'APPROVED')
-      throw new Error('Approve overtime before reviewing night differential.');
+      throw new Error('Approve overtime before reviewing Differential.');
     if (args.decision === 'APPROVED' &&
         (inPunch.verification !== 'APPROVED' || outPunch.verification !== 'APPROVED'))
-      throw new Error('Approve the offsite Time In and Time Out proofs first.');
+      throw new Error('Approve the employee Time In and Time Out proofs first.');
     if (args.decision === 'APPROVED' && outPunch.method === 'ADMIN' && outPunch.assignmentType !== 'OFFSITE')
       throw new Error('Admin-created overtime needs an offsite Time Out assignment.');
     const changes = args.stage === 'OVERTIME'
@@ -378,7 +406,8 @@ export const reviewExtension = mutation({ args: { ...tokenArg, id: v.string(), s
 });
 
 // Internal functions are callable only by the password and file actions.
-export const userForLogin = internalQuery({ args: { email: v.string() }, handler: (ctx, { email }) => userByEmail(ctx, email) });
+export const userForLogin = internalQuery({ args: { identifier: v.string() }, handler: (ctx, { identifier }) =>
+  /^\d{11}$/.test(identifier) ? userByMobile(ctx, identifier) : userByEmail(ctx, identifier) });
 export const userForToken = internalQuery({ args: { token: v.string(), role: v.optional(v.string()) }, handler: (ctx, { token, role }) => authUser(ctx, token, role) });
 export const loginAttempt = internalQuery({ args: { email: v.string() }, handler: (ctx, { email }) => ctx.db.query('loginAttempts').withIndex('by_email', q => q.eq('email', email)).unique() });
 export const recordLoginFailure = internalMutation({ args: { email: v.string() }, handler: async (ctx, { email }) => {
@@ -447,8 +476,8 @@ export const updateProfileImage = internalMutation({ args: {
   if (!args.remove && !args.profileImageId) throw new Error('Choose a profile photo.');
   if (args.profileImageId) {
     const file = await ctx.db.system.get(args.profileImageId);
-    if (!file || !['image/jpeg', 'image/png', 'image/webp'].includes(file.contentType) || file.size < 1000 || file.size > 2_000_000)
-      throw new Error('Profile photo must be an image under 2 MB.');
+    if (!file || !['image/jpeg', 'image/png', 'image/webp'].includes(file.contentType) || file.size < 1000 || file.size > 750_000)
+      throw new Error('Profile photo must be a compressed image under 750 KB.');
   }
   const previousImageId = user.profileImageId;
   await ctx.db.patch(user._id, { profileImageId: args.remove ? undefined : args.profileImageId });
@@ -479,12 +508,12 @@ export const changePassword = internalMutation({ args: { token: v.string(), oldH
 export const createEmployee = internalMutation({ args: { token: v.string(), input: v.any() }, handler: async (ctx, { token, input }) => {
   const admin = await authUser(ctx, token, 'admin');
   validateEmployee(input, true);
-  const email = input.email.trim().toLowerCase();
-  if (await userByEmail(ctx, email)) throw new Error('Email is already in use.');
-  const id = await ctx.db.insert('users', { name: input.name.trim(), email, passwordHash: input.passwordHash,
+  const mobile = input.mobile.trim();
+  if (await userByMobile(ctx, mobile)) throw new Error('Mobile number is already in use.');
+  const id = await ctx.db.insert('users', { name: input.name.trim(), mobile, passwordHash: input.passwordHash,
     role: 'employee', active: true, scheduleStart: input.scheduleStart, scheduleEnd: input.scheduleEnd,
-    workdays: input.workdays, graceMinutes: 0, createdAt: now(), isDemo: input.isDemo === true });
-  await audit(ctx, admin._id, 'employee_create', 'user', id, { email, isDemo: input.isDemo === true });
+    workdays: input.workdays, graceMinutes: 0, createdAt: now() });
+  await audit(ctx, admin._id, 'employee_create', 'user', id, { mobile });
   return { employee: userView(await ctx.db.get(id)) };
 }});
 export const updateEmployee = internalMutation({ args: { token: v.string(), id: v.string(), input: v.any() }, handler: async (ctx, { token, id, input }) => {
@@ -493,25 +522,23 @@ export const updateEmployee = internalMutation({ args: { token: v.string(), id: 
   const old = userId && await ctx.db.get(userId);
   if (!old || old.role !== 'employee') throw new Error('Employee not found.');
   validateEmployee(input, false);
-  const email = input.email.trim().toLowerCase();
-  const other = await userByEmail(ctx, email);
-  if (other && other._id !== userId) throw new Error('Email is already in use.');
-  await ctx.db.patch(userId, { name: input.name.trim(), email, scheduleStart: input.scheduleStart,
+  const mobile = input.mobile.trim();
+  const other = await userByMobile(ctx, mobile);
+  if (other && other._id !== userId) throw new Error('Mobile number is already in use.');
+  await ctx.db.patch(userId, { name: input.name.trim(), mobile, email: undefined, scheduleStart: input.scheduleStart,
     scheduleEnd: input.scheduleEnd, workdays: input.workdays, graceMinutes: 0,
-    active: !!input.active, ...(input.passwordHash ? { passwordHash: input.passwordHash } : {}) });
+    active: !!input.active, isDemo: undefined, ...(input.passwordHash ? { passwordHash: input.passwordHash } : {}) });
   const sessions = await ctx.db.query('sessions').withIndex('by_user', q => q.eq('userId', userId)).collect();
   for (const session of sessions) await ctx.db.delete(session._id);
   const updated = await ctx.db.get(userId);
   await audit(ctx, admin._id, 'employee_update', 'user', userId, { before: userView(old), after: userView(updated) });
   return { employee: userView(updated) };
 }});
-export const deleteDemoEmployee = mutation({ args: { token: v.string(), id: v.string() }, handler: async (ctx, { token, id }) => {
+export const deleteEmployee = mutation({ args: { token: v.string(), id: v.string() }, handler: async (ctx, { token, id }) => {
   const admin = await authUser(ctx, token, 'admin');
   const userId = ctx.db.normalizeId('users', id);
   const employee = userId && await ctx.db.get(userId);
-  if (!employee || employee.role !== 'employee' || employee.isDemo !== true) {
-    throw new Error('Only demo employee accounts can be deleted here.');
-  }
+  if (!employee || employee.role !== 'employee') throw new Error('Employee not found.');
   const sessions = await ctx.db.query('sessions').withIndex('by_user', q => q.eq('userId', userId)).collect();
   const punches = await ctx.db.query('punches').withIndex('by_user_date', q => q.eq('userId', userId)).collect();
   const extensions = await ctx.db.query('extensions').withIndex('by_user_date', q => q.eq('userId', userId)).collect();
@@ -523,12 +550,13 @@ export const deleteDemoEmployee = mutation({ args: { token: v.string(), id: v.st
   }
   for (const extension of extensions) await ctx.db.delete(extension._id);
   for (const entry of overtime) await ctx.db.delete(entry._id);
-  const attempts = await ctx.db.query('loginAttempts').withIndex('by_email', q => q.eq('email', employee.email)).collect();
+  const loginKey = employee.mobile || employee.email;
+  const attempts = loginKey ? await ctx.db.query('loginAttempts').withIndex('by_email', q => q.eq('email', loginKey)).collect() : [];
   for (const attempt of attempts) await ctx.db.delete(attempt._id);
   if (employee.profileImageId) await ctx.storage.delete(employee.profileImageId);
   await ctx.db.delete(userId);
-  await audit(ctx, admin._id, 'demo_employee_delete', 'user', userId, {
-    email: employee.email, punches: punches.length, extensions: extensions.length, overtime: overtime.length
+  await audit(ctx, admin._id, 'employee_delete', 'user', userId, {
+    mobile: employee.mobile, punches: punches.length, extensions: extensions.length, overtime: overtime.length
   });
   return { ok: true };
 }});
