@@ -13,7 +13,7 @@ const state = {
   branding: { appName: 'Onsite DTR', logo192Url: null, logo512Url: null },
   signupAvailable: false, authMode: 'login', signupPhoto: null,
   employees: [], adminData: { punches: [], extensions: [], overtime: [] }, historyRange: null,
-  adminRange: null, reportRange: null, selectedEmployee: null, capture: null,
+  adminRange: null, reportRange: null, reportEmployeeId: null, selectedEmployee: null, capture: null,
   backfillDraft: null, backfillLoadId: 0, backfillLoading: false,
   cameraStream: null, sitePromptedDate: null, onsiteAccess: null, installPrompt: null, installDismissed: false, modal: null, auditItems: [],
   message: '', messageType: 'notice'
@@ -111,6 +111,9 @@ async function api(path, options = {}) {
 }
 
 function hideToast() {
+  state.message = '';
+  const flashBox = document.getElementById('flash');
+  if (flashBox) { flashBox.hidden = true; flashBox.textContent = ''; }
   const toast = document.getElementById('toast');
   if (!toast) return;
   toast.classList.remove('toast-show');
@@ -164,7 +167,7 @@ function flash(message, type = 'notice') {
   toast.append(icon, copy, close);
   document.body.append(toast);
   window.requestAnimationFrame(() => toast.classList.add('toast-show'));
-  toastTimer = window.setTimeout(hideToast, normalizedType === 'error' ? 6500 : 4500);
+  toastTimer = window.setTimeout(hideToast, 3000);
 }
 function formatTime(iso) {
   if (!iso) return '—';
@@ -455,6 +458,7 @@ function backfillInputFromForm(form) {
 }
 async function go(section) {
   stopCamera(); state.section = section; state.modal = null; state.message = '';
+  if (section === 'report') { state.reportRange = null; state.reportEmployeeId = null; }
   if (section === 'backfill') { state.backfillLoadId++; state.backfillLoading = false; state.backfillDraft = blankBackfillDraft(); }
   try {
     if (state.session.user.role === 'employee' && ['home', 'history'].includes(section)) await loadEmployee(section === 'home' ? currentRange() : state.historyRange || currentRange());
@@ -472,7 +476,7 @@ async function go(section) {
 
 function renderLogin() {
   const signup = state.signupAvailable && state.authMode === 'signup';
-  root.innerHTML = `${installPromptMarkup('floating-install')}<div class="login-wrap"><section class="login-art" aria-label="Philippine AODA Power Corp. generator facility"><div class="login-company"><div class="login-company-logo">${brandIconMarkup()}</div><div class="login-company-name"><span>PHILIPPINE</span><strong>AODA POWER CORP.</strong></div></div><div class="login-hero-copy"><span class="login-hero-rule"></span><div class="headline">Reliable power.<br>Accountable work.</div></div><div class="login-art-footer"><span>GENSET OPERATIONS</span><span>DIGITAL TIME RECORD</span></div></section><section class="login-panel"><div class="login-mobile-brand"><div class="login-company-logo">${brandIconMarkup()}</div><div class="login-company-name"><span>PHILIPPINE</span><strong>AODA POWER CORP.</strong></div></div><div class="login-box"><div class="login-form-mark">${brandIconMarkup()}</div><p class="eyebrow">${signup ? 'ADMIN SETUP' : 'SECURE ACCESS'}</p><h1>${signup ? 'Create admin account' : 'Welcome back'}</h1>${state.message ? `<div class="notice ${h(state.messageType)}">${h(state.message)}</div>` : ''}${signup ? `<form id="signup-form"><div class="field"><label for="signup-name">Full name</label><input id="signup-name" name="name" minlength="2" maxlength="120" autocomplete="name" required></div><div class="field"><label for="signup-email">Email address</label><input id="signup-email" name="email" type="email" autocomplete="email" required></div><div class="field-row"><div class="field"><label for="signup-password">Password</label><input id="signup-password" name="password" type="password" minlength="8" autocomplete="new-password" placeholder="8+ characters" required></div><div class="field"><label for="signup-confirm">Confirm password</label><input id="signup-confirm" name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required></div></div><div class="field"><label for="signup-photo">Profile picture</label><input id="signup-photo" type="file" accept="image/png,image/jpeg,image/webp"><img id="signup-photo-preview" class="profile-photo-preview ${state.signupPhoto ? '' : 'hidden'}" src="${state.signupPhoto || ''}" alt="Profile photo preview"></div><label class="check-row"><input type="checkbox" name="remember" checked> Keep me signed in</label><button class="btn block login-submit" type="submit">Create account <span aria-hidden="true">→</span></button></form><button class="link-button auth-switch" data-action="auth-login">Return to sign in</button>` : `<form id="login-form"><div class="field"><label for="identifier">Email or mobile number</label><input id="identifier" name="identifier" type="text" inputmode="email" maxlength="200" autocomplete="username" placeholder="Enter your account" required></div><div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></div><label class="check-row"><input type="checkbox" name="remember" checked> Keep me signed in</label><button class="btn block login-submit" type="submit">Sign in <span aria-hidden="true">→</span></button></form>${state.signupAvailable ? '<button class="link-button auth-switch" data-action="auth-signup">Set up administrator access</button>' : ''}`}</div><div class="login-panel-footer"><span>${h(state.branding.appName)}</span><span>Asia/Manila</span></div></section></div>`;
+  root.innerHTML = `${installPromptMarkup('floating-install')}<div class="login-wrap"><section class="login-art" aria-label="Philippine AODA Power Corp. generator facility"><div class="login-company"><div class="login-company-logo">${brandIconMarkup()}</div><div class="login-company-name"><span>PHILIPPINE</span><strong>AODA POWER CORP.</strong></div></div><div class="login-hero-copy"><span class="login-hero-rule"></span><div class="headline">Reliable power.<br>Accountable work.</div></div><div class="login-art-footer"><span>GENSET OPERATIONS</span><span>DIGITAL TIME RECORD</span></div></section><section class="login-panel"><div class="login-mobile-brand"><div class="login-company-logo">${brandIconMarkup()}</div><div class="login-company-name"><span>PHILIPPINE</span><strong>AODA POWER CORP.</strong></div></div><div class="login-box"><div class="login-form-mark">${brandIconMarkup()}</div><p class="eyebrow">${signup ? 'ADMIN SETUP' : 'SECURE ACCESS'}</p><h1>${signup ? 'Create admin account' : 'Welcome back'}</h1>${state.message ? `<div id="flash" class="notice ${h(state.messageType)}">${h(state.message)}</div>` : ''}${signup ? `<form id="signup-form"><div class="field"><label for="signup-name">Full name</label><input id="signup-name" name="name" minlength="2" maxlength="120" autocomplete="name" required></div><div class="field"><label for="signup-email">Email address</label><input id="signup-email" name="email" type="email" autocomplete="email" required></div><div class="field-row"><div class="field"><label for="signup-password">Password</label><input id="signup-password" name="password" type="password" minlength="8" autocomplete="new-password" placeholder="8+ characters" required></div><div class="field"><label for="signup-confirm">Confirm password</label><input id="signup-confirm" name="confirmPassword" type="password" minlength="8" autocomplete="new-password" required></div></div><div class="field"><label for="signup-photo">Profile picture</label><input id="signup-photo" type="file" accept="image/png,image/jpeg,image/webp"><img id="signup-photo-preview" class="profile-photo-preview ${state.signupPhoto ? '' : 'hidden'}" src="${state.signupPhoto || ''}" alt="Profile photo preview"></div><label class="check-row"><input type="checkbox" name="remember" checked> Keep me signed in</label><button class="btn block login-submit" type="submit">Create account <span aria-hidden="true">→</span></button></form><button class="link-button auth-switch" data-action="auth-login">Return to sign in</button>` : `<form id="login-form"><div class="field"><label for="identifier">Email or mobile number</label><input id="identifier" name="identifier" type="text" inputmode="email" maxlength="200" autocomplete="username" placeholder="Enter your account" required></div><div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></div><label class="check-row"><input type="checkbox" name="remember" checked> Keep me signed in</label><button class="btn block login-submit" type="submit">Sign in <span aria-hidden="true">→</span></button></form>${state.signupAvailable ? '<button class="link-button auth-switch" data-action="auth-signup">Set up administrator access</button>' : ''}`}</div><div class="login-panel-footer"><span>${h(state.branding.appName)}</span><span>Asia/Manila</span></div></section></div>`;
 }
 
 const employeeNav = [['home', '⌂', 'Home'], ['history', '▤', 'Attendance'], ['capture', '◎', 'Time clock'], ['profile', '◉', 'Profile']];
@@ -766,25 +770,28 @@ function renderReportHeader(range, generated, className = '') {
     <div class="report-meta"><div><strong>EMPLOYEE ATTENDANCE SUMMARY</strong><p>${h(state.branding.appName)} · Cutoff: ${h(numericDate(range.start))} – ${h(numericDate(range.end))} · Asia/Manila</p></div><small>Generated: ${h(generated)}</small></div>
     <p class="report-policy">Regular time starts at 8:00 AM, includes 12:00–1:00 PM, and may extend after 5:00 PM until 8 hours are complete. OT begins only after 5:00 PM and after 8 regular hours. Work from 10:00 PM–6:00 AM is reported separately as Differential.</p></div>`;
 }
-function renderReportEmployee({ employee, rows, totals }, range, generated) {
+function renderReportEmployee({ employee, rows, totals }, range, generated, visible = false) {
   const body = rows.map(row => `<tr><td data-label="Date">${h(numericDate(row.date))}</td>
     <td data-label="Time In">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatShiftTime(group.inPunch?.timeUtc, row.date))}</div>`).join('') || '—'}</td>
     <td data-label="Time Out">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatShiftTime(group.outPunch?.timeUtc, row.date))}</div>`).join('') || '—'}</td>
     <td data-label="Source">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(punchSource(group.inPunch))} / ${h(punchSource(group.outPunch))}</div>`).join('') || '—'}</td>
     <td data-label="Regular">${h(formatMinutes(row.regular))}</td><td data-label="Undertime">${h(formatMinutes(row.undertime))}</td>
     <td data-label="OT">${h(formatMinutes(row.overtime))}</td><td data-label="Differential">${h(formatMinutes(row.night))}</td></tr>`).join('');
-  return `<section class="report-employee">${renderReportHeader(range, generated, 'employee-report-header')}<div class="report-employee-head"><div><span>EMPLOYEE</span><h3>${h(employee.name)}</h3></div><div class="report-total"><span>Approved regular</span><strong>${h(formatMinutes(totals.regular))}</strong></div></div>
+  return `<section class="report-employee ${visible ? '' : 'report-unselected'}">${renderReportHeader(range, generated, 'employee-report-header')}<div class="report-employee-head"><div><span>EMPLOYEE</span><h3>${h(employee.name)}</h3></div><div class="report-total"><span>Approved regular</span><strong>${h(formatMinutes(totals.regular))}</strong></div></div>
     <div class="report-summary-grid"><div><span>OT</span><strong>${h(formatMinutes(totals.overtime))}</strong></div><div><span>Differential</span><strong>${h(formatMinutes(totals.night))}</strong></div><div><span>Undertime</span><strong>${h(formatMinutes(totals.undertime))}</strong></div><div><span>Exceptions</span><strong>${totals.pending}</strong></div><div><span>No record</span><strong>${totals.noRecord}</strong></div><div><span>Holidays</span><strong>${totals.holidays}</strong></div></div>
     <div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Source</th><th>Regular</th><th>Undertime</th><th>OT</th><th>Differential</th></tr></thead><tbody>${body}</tbody></table></div></section>`;
 }
 function renderReport() {
   const range = state.reportRange || currentRange();
-  const report = reportRows();
+  const report = reportRows().sort((a, b) => a.employee.name.localeCompare(b.employee.name));
+  const selected = report.some(item => item.employee.id === state.reportEmployeeId);
   const generated = new Date().toLocaleString('en-PH', { timeZone });
   return `<div class="section-head no-print"><div><p class="eyebrow">PAYROLL</p><h1 class="section-title">Cutoff report</h1><p>Only daily attendance approved by the admin is included in payroll totals.</p></div><button class="icon-btn print-button" type="button" data-action="print" aria-label="Print or save PDF" title="Print / Save PDF"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9V3h10v6M7 18H5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2 2h14a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M7 14h10v7H7z"/><path d="M17.5 12h.01"/></svg></button></div>
-    <form id="report-filter" class="filters no-print"><div class="field"><label>From</label><input type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label>To</label><input type="date" name="to" value="${h(range.end)}" required></div><button class="btn secondary" type="submit">Show report</button></form>
-    <div class="report-sheet">${renderReportHeader(range, generated, 'report-cover-header')}
-    ${report.length ? report.map(item => renderReportEmployee(item, range, generated)).join('') : '<p class="empty">No employees found for this report.</p>'}</div>`;
+    <div id="report-filter" class="filters no-print"><div class="field"><label for="report-period">Payroll filter</label><select id="report-period" name="period"><option value="current" ${state.reportRange ? '' : 'selected'}>Current payroll · ${h(dateSpan(currentRange()))}</option><option value="custom" ${state.reportRange ? 'selected' : ''}>Custom dates</option></select></div>${state.reportRange ? `<div class="field"><label for="report-from">From</label><input id="report-from" type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label for="report-to">To</label><input id="report-to" type="date" name="to" value="${h(range.end)}" required></div>` : ''}</div>
+    <div class="report-employee-list no-print" aria-label="Employee reports">${report.length ? report.map(item => `<button type="button" class="report-employee-choice ${item.employee.id === state.reportEmployeeId ? 'active' : ''}" data-action="open-report-employee" data-id="${h(item.employee.id)}" aria-expanded="${item.employee.id === state.reportEmployeeId}"><span>${h(item.employee.name)}</span><span aria-hidden="true">${item.employee.id === state.reportEmployeeId ? '⌃' : '›'}</span></button>`).join('') : '<p class="empty">No employees found for this report.</p>'}</div>
+    ${report.length && !selected ? '<p class="report-prompt no-print">Select an employee to view the full report. Print / Save PDF includes all employees for this cutoff.</p>' : ''}
+    <div class="report-sheet ${selected ? '' : 'report-sheet-collapsed'}">${renderReportHeader(range, generated, 'report-cover-header')}
+    ${report.length ? report.map(item => renderReportEmployee(item, range, generated, item.employee.id === state.reportEmployeeId)).join('') : '<p class="empty">No employees found for this report.</p>'}</div>`;
 }
 function haversine(lat1, lng1, lat2, lng2) {
   const rad = Math.PI / 180, dLat = (lat2 - lat1) * rad, dLng = (lng2 - lng1) * rad;
@@ -1067,6 +1074,13 @@ document.addEventListener('click', async event => {
     if (action === 'site-settings') return showModal({ kind: 'site-settings' });
     if (action === 'payroll-settings') return showModal({ kind: 'payroll-settings' });
     if (action === 'records-filter') return showModal({ kind: 'records-filter' });
+    if (action === 'open-report-employee') {
+      state.reportEmployeeId = state.reportEmployeeId === node.dataset.id ? null : node.dataset.id;
+      renderView();
+      document.querySelector(state.reportEmployeeId ? '.report-sheet' : '.report-employee-list')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
     if (action === 'location') { state.capture.location = await geo(); return renderView(); }
     if (action === 'camera-start') return await startCamera();
     if (action === 'camera-snap') return await snapCamera();
@@ -1179,6 +1193,20 @@ document.addEventListener('click', async event => {
 
 document.addEventListener('change', async event => {
   try {
+    if (event.target.closest('#report-filter')) {
+      if (event.target.name === 'period') {
+        state.reportRange = event.target.value === 'current' ? null : { ...currentRange() };
+        state.reportEmployeeId = null;
+        if (!state.reportRange) await loadAdmin(currentRange(), null, false);
+        return renderView();
+      }
+      const filter = document.getElementById('report-filter');
+      const range = validateRange(filter.querySelector('[name="from"]').value, filter.querySelector('[name="to"]').value);
+      await loadAdmin(range, null, false);
+      state.reportRange = range;
+      state.reportEmployeeId = null;
+      return renderView();
+    }
     if (event.target.closest('#backfill-form') && ['employeeId', 'workDate'].includes(event.target.name)) {
       const form = event.target.form;
       return await loadBackfillDay(form.elements.employeeId.value, form.elements.workDate.value);
@@ -1246,7 +1274,6 @@ document.addEventListener('submit', async event => {
     }
     if (id === 'history-form') { state.historyRange = validateRange(values.from, values.to); await loadEmployee(state.historyRange); return renderView(); }
     if (id === 'records-filter') { state.adminRange = validateRange(values.from, values.to); await loadAdmin(state.adminRange); closeModal(); return renderView(); }
-    if (id === 'report-filter') { state.reportRange = validateRange(values.from, values.to); await loadAdmin(state.reportRange); return renderView(); }
     if (id === 'delete-employee-form') {
       if (values.confirmation !== 'DELETE') throw new Error('Type DELETE to confirm.');
       await api(`/api/admin/employees/${values.id}`, { method: 'DELETE' });
