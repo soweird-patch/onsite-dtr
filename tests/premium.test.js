@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { approveAttendanceDay, autoTimeOut, backfill, continueOffsite, reviewExtension, syncAutomaticPremiums,
-  saveAdminAttendanceDay, verify } from '../convex/core.js';
-import { shiftInstant } from '../rules.js';
+  saveAdminAttendanceDay, submitPunch, updateEmployee, verify } from '../convex/core.js';
+import { localDateTime, payrollDayTotals, shiftInstant } from '../rules.js';
 
 function fixture() {
   const tables = Object.fromEntries(['users', 'sessions', 'settings', 'punches', 'extensions', 'overtime', 'audit']
@@ -30,6 +30,7 @@ function fixture() {
     async insert(table, value) { const id = `${table}:${++next}`; tables[table].set(id, { _id: id, ...value }); return id; },
     async get(id) { return Object.values(tables).map(table => table.get(id)).find(Boolean) || null; },
     async patch(id, changes) { const row = await db.get(id); assert.ok(row); Object.assign(row, changes); },
+    async delete(id) { tables[id.split(':')[0]].delete(id); },
     async replace(id, value) { const table = id.split(':')[0]; tables[table].set(id, { _id: id, ...value }); }
   };
   const ctx = { db };
@@ -40,7 +41,7 @@ function fixture() {
   return { ctx, tables, token, addUser, authorize };
 }
 
-test('admin separately grants overtime and night hours, with denial cascading', async () => {
+test('admin reviews overtime and night hours independently; rejected proof excludes both', async () => {
   const f = fixture(), date = '2026-10-15';
   const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
   await f.authorize(adminId);
@@ -53,12 +54,12 @@ test('admin separately grants overtime and night hours, with denial cascading', 
     overtimeDecision: 'PENDING', nightDecision: 'PENDING' });
   const review = (stage, decision, reason) => reviewExtension._handler(f.ctx,
     { token: f.token, id: extensionId, stage, decision, ...(reason ? { reason } : {}) });
-  await assert.rejects(review('NIGHT', 'APPROVED'), /Approve overtime before/);
+  await review('NIGHT', 'APPROVED');
   await review('OVERTIME', 'APPROVED', 'Approved field assignment');
   await review('NIGHT', 'APPROVED');
   assert.equal((await f.ctx.db.get(extensionId)).nightDecision, 'APPROVED');
   await review('OVERTIME', 'REJECTED');
-  assert.equal((await f.ctx.db.get(extensionId)).nightDecision, 'REJECTED');
+  assert.equal((await f.ctx.db.get(extensionId)).nightDecision, 'APPROVED');
   await review('OVERTIME', 'APPROVED');
   await verify._handler(f.ctx, { token: f.token, id: outId, verification: 'REJECTED', reason: 'No valid proof' });
   assert.equal((await f.ctx.db.get(extensionId)).overtimeDecision, 'REJECTED');
@@ -84,21 +85,21 @@ test('admin approves Time In and Time Out together for daily payroll', async () 
     { token: f.token, userId, workDate: nextDate }), /Both Time In and Time Out/);
 });
 
-test('approving a completed day automatically creates the overtime review after 5 PM', async () => {
+test('approving a completed early day creates pending overtime before 5 PM', async () => {
   const f = fixture(), date = '2026-10-15';
   const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
   await f.authorize(adminId);
   await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'IN', method: 'ONSITE',
-    timeUtc: shiftInstant(date, '09:00'), verification: 'PENDING', active: true });
+    timeUtc: shiftInstant(date, '07:40'), verification: 'PENDING', active: true });
   await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'OUT', method: 'ONSITE',
-    timeUtc: shiftInstant(date, '18:00'), verification: 'PENDING', active: true });
+    timeUtc: shiftInstant(date, '16:50'), verification: 'PENDING', active: true });
   await approveAttendanceDay._handler(f.ctx, { token: f.token, userId, workDate: date });
   const extension = [...f.tables.extensions.values()][0];
   assert.equal(extension.source, 'AUTO');
   assert.equal(extension.overtimeDecision, 'PENDING');
-  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id,
-    stage: 'ADJUSTMENT', decision: 'APPROVED' });
-  assert.equal(extension.adjustmentDecision, 'APPROVED');
+  assert.equal(payrollDayTotals(date, [...f.tables.punches.values()], extension).overtime, 0);
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id, stage: 'OVERTIME', decision: 'APPROVED' });
+  assert.equal(payrollDayTotals(date, [...f.tables.punches.values()], extension).overtime, 10);
 });
 
 test('admin-entered onsite work after 5 PM also receives an automatic OT review', async () => {
@@ -114,7 +115,7 @@ test('admin-entered onsite work after 5 PM also receives an automatic OT review'
   assert.equal(extension.overtimeDecision, 'APPROVED');
 });
 
-test('regular adjustment and remaining overtime have independent approvals', async () => {
+test('flexible schedules fill regular hours automatically before OT review', async () => {
   const f = fixture(), date = '2026-10-15';
   const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
   await f.authorize(adminId);
@@ -124,11 +125,11 @@ test('regular adjustment and remaining overtime have independent approvals', asy
     timeUtc: shiftInstant(date, '22:00'), verification: 'PENDING', active: true });
   await approveAttendanceDay._handler(f.ctx, { token: f.token, userId, workDate: date });
   const extension = [...f.tables.extensions.values()][0];
-  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id,
-    stage: 'ADJUSTMENT', decision: 'APPROVED' });
+  await assert.rejects(reviewExtension._handler(f.ctx, { token: f.token, id: extension._id,
+    stage: 'ADJUSTMENT', decision: 'APPROVED' }), /No OT-to-regular adjustment/);
   await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id,
     stage: 'OVERTIME', decision: 'REJECTED' });
-  assert.equal(extension.adjustmentDecision, 'APPROVED');
+  assert.equal(payrollDayTotals(date, [...f.tables.punches.values()], extension).regular, 480);
   assert.equal(extension.overtimeDecision, 'REJECTED');
 });
 
@@ -297,5 +298,114 @@ test('one offsite continuation tap records GPS and schedules the 6 AM close', as
     assert.equal(scheduled.time, RealDate.parse(shiftInstant(date, '06:00', true)));
     await assert.rejects(continueOffsite._handler(f.ctx, { token: f.token,
       latitude: 14.7, longitude: 121.1, accuracyM: 12 }), /already recorded/);
+  } finally { globalThis.Date = RealDate; }
+});
+
+test('schedule edits apply immediately from the chosen date, preserve punches, and reopen premium reviews', async () => {
+  const f = fixture(), date = localDateTime(new Date().toISOString()).date;
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  await f.ctx.db.patch(userId, { mobile: '09123456789', scheduleStart: '08:00', scheduleEnd: '17:00', workdays: [1,2,3,4,5,6] });
+  const priorDate = new Date(Date.parse(`${date}T00:00:00Z`) - 86400000).toISOString().slice(0,10);
+  await backfill._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: priorDate,
+    timeIn: '08:00', timeOut: '17:00', reason: 'Prior workday entry' } });
+  await backfill._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: date,
+    timeIn: '07:40', timeOut: '23:00', reason: 'Current field assignment' } });
+  const todayPunches = [...f.tables.punches.values()].filter(p => p.workDate === date);
+  await f.ctx.db.patch(todayPunches[0]._id, { selfieId: 'original-selfie', latitude: 14.5 });
+  const originalTimes = todayPunches.map(p => p.timeUtc);
+  const extension = [...f.tables.extensions.values()].find(e => e.workDate === date);
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id, stage: 'OVERTIME', decision: 'APPROVED' });
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id, stage: 'NIGHT', decision: 'APPROVED' });
+  const oldKey = extension.calculationKey;
+  assert.ok(payrollDayTotals(date, todayPunches, extension).overtime > 0);
+  await updateEmployee._handler(f.ctx, { token: f.token, id: userId, input: {
+    name: 'Worker', mobile: '09123456789', scheduleStart: '07:00', scheduleEnd: '16:00',
+    workdays: [1,2,3,4,5,6], active: true, scheduleEffectiveDate: date
+  } });
+  assert.ok(todayPunches.every(p => p.scheduleStart === '07:00' && p.scheduleEnd === '16:00'));
+  assert.deepEqual(todayPunches.map(p => p.timeUtc), originalTimes);
+  assert.equal(todayPunches[0].selfieId, 'original-selfie');
+  assert.ok([...f.tables.punches.values()].filter(p => p.workDate === priorDate).every(p => p.scheduleStart === '08:00'));
+  assert.equal(extension.overtimeDecision, 'PENDING');
+  assert.equal(extension.nightDecision, 'PENDING');
+  assert.equal(payrollDayTotals(date, todayPunches, extension).overtime, 0);
+  assert.equal(payrollDayTotals(date, todayPunches, extension).night, 0);
+  assert.ok([...f.tables.audit.values()].some(a => a.action === 'attendance_schedule_update' && a.details.before.scheduleStart === '08:00'));
+  assert.ok([...f.tables.audit.values()].some(a => a.action === 'premium_recalculated' && a.details.before.overtimeDecision === 'APPROVED'));
+  await assert.rejects(reviewExtension._handler(f.ctx, { token: f.token, id: extension._id,
+    stage: 'OVERTIME', decision: 'APPROVED', calculationKey: oldKey }), /calculations changed/);
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id,
+    stage: 'OVERTIME', decision: 'APPROVED', calculationKey: extension.calculationKey });
+  await syncAutomaticPremiums._handler(f.ctx, { token: f.token, from: date, to: date });
+  assert.equal(extension.overtimeDecision, 'APPROVED');
+});
+
+test('schedule edits update an open current-day shift without replacing its Time In or ending its session', async () => {
+  const f = fixture(), date = localDateTime(new Date().toISOString()).date;
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  await f.ctx.db.patch(userId, { mobile: '09123456789', scheduleStart: '08:00', scheduleEnd: '17:00' });
+  const sessionId = await f.ctx.db.insert('sessions', { userId, tokenHash: 'employee-session', expiresAt: Date.now() + 86400000 });
+  const punchId = await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'IN', timeUtc: shiftInstant(date,'07:40'),
+    scheduleStart: '08:00', scheduleEnd: '17:00', method: 'ONSITE', selfieId: 'original', verification: 'PENDING', active: true });
+  await updateEmployee._handler(f.ctx, { token: f.token, id: userId, input: {
+    name: 'Worker', mobile: '09123456789', scheduleStart: '07:00', scheduleEnd: '16:00', workdays: [1,2,3,4,5,6], active: true
+  } });
+  assert.equal((await f.ctx.db.get(punchId)).scheduleStart, '07:00');
+  assert.equal((await f.ctx.db.get(punchId)).timeUtc, shiftInstant(date,'07:40'));
+  assert.equal((await f.ctx.db.get(punchId)).selfieId, 'original');
+  assert.ok(await f.ctx.db.get(sessionId));
+  assert.equal(f.tables.extensions.size, 0);
+});
+
+test('each admin interval has independent details; metadata edits preserve proof and approvals', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  const segments = [
+    { timeIn: '07:40', timeOut: '16:50', reason: 'Morning client inspection', fieldAssignment: 'Client A - Kawit' },
+    { timeIn: '21:00', timeOut: '23:00', reason: 'Urgent equipment repair', fieldAssignment: 'Client B - Imus' }
+  ];
+  await saveAdminAttendanceDay._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: date, expectedIds: [], segments } });
+  let active = [...f.tables.punches.values()].filter(p => p.active);
+  assert.ok(active.filter(p => p.segment === 1).every(p => p.reason === segments[0].reason && p.fieldAssignment === segments[0].fieldAssignment));
+  assert.ok(active.filter(p => p.segment === 2).every(p => p.reason === segments[1].reason && p.fieldAssignment === segments[1].fieldAssignment));
+  const extension = [...f.tables.extensions.values()][0];
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id, stage: 'OVERTIME', decision: 'APPROVED' });
+  const firstIn = active.find(p => p.segment === 1 && p.slot === 'IN');
+  await f.ctx.db.patch(firstIn._id, { selfieId: 'preserved-selfie', latitude: 14.6 });
+  const edited = segments.map((segment,index) => ({ ...segment,
+    inId: active.find(p => p.segment === index + 1 && p.slot === 'IN')._id,
+    outId: active.find(p => p.segment === index + 1 && p.slot === 'OUT')._id }));
+  edited[0].fieldAssignment = 'Client C - Bacoor';
+  await saveAdminAttendanceDay._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: date,
+    expectedIds: active.map(p => p._id), segments: edited } });
+  assert.equal(firstIn.fieldAssignment, 'Client C - Bacoor');
+  assert.equal(firstIn.selfieId, 'preserved-selfie');
+  assert.equal(extension.overtimeDecision, 'APPROVED');
+  assert.ok([...f.tables.punches.values()].filter(p => p.segment === 2).every(p => p.fieldAssignment === 'Client B - Imus'));
+  assert.ok([...f.tables.audit.values()].some(a => a.action === 'interval_details_update' && a.details.before.fieldAssignment === 'Client A - Kawit'));
+});
+
+test('employee clock-in enforces the 6 AM to 4 PM window, including both boundaries', async () => {
+  const f = fixture(), date = '2026-10-15', userId = await f.addUser('Worker','employee');
+  await f.authorize(userId);
+  f.ctx.db.system = { async get() { return { contentType: 'image/jpeg', size: 2000 }; } };
+  const RealDate = globalThis.Date;
+  try {
+    for (const [time, allowed] of [['05:59',false],['06:00',true],['16:00',true],['16:01',false]]) {
+      const instant = RealDate.parse(shiftInstant(date, time));
+      globalThis.Date = class extends RealDate {
+        constructor(...args) { super(...(args.length ? args : [instant])); }
+        static now() { return instant; }
+      };
+      const call = () => submitPunch._handler(f.ctx, { token: f.token, selfieId: 'photo',
+        input: { slot: 'IN', latitude: 14.5, longitude: 121, accuracyM: 10 } });
+      if (allowed) {
+        await call();
+        f.tables.punches.clear();
+      } else await assert.rejects(call(), /between 6:00 AM and 4:00 PM/);
+    }
   } finally { globalThis.Date = RealDate; }
 });

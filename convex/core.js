@@ -1,7 +1,7 @@
 import { query, mutation, internalQuery, internalMutation } from './_generated/server.js';
 import { internal } from './_generated/api.js';
 import { v } from 'convex/values';
-import { cutoffFor, groupPunches, holidayFor, localDateTime, shiftInstant, workBreakdownIntervals } from '../rules.js';
+import { cutoffFor, groupPunches, holidayFor, localDateTime, premiumCalculationKey, shiftInstant, workBreakdownIntervals } from '../rules.js';
 import { audit, authUser, dateRange, dayNow, digest, distanceMeters, localTimeToUtc,
   now, punchView, safeDate, settings, settingsDefault, settingsView, timezone,
   userView, validateEmployee, validEmail } from './lib.js';
@@ -32,9 +32,34 @@ function breakdownForDay(date, punches, continuedAt, employee) {
 async function extensionFor(ctx, userId, date) {
   return ctx.db.query('extensions').withIndex('by_user_date', q => q.eq('userId', userId).eq('workDate', date)).unique();
 }
+// Bind every review to the exact intervals and schedule that were reviewed.
+async function syncDayPremiums(ctx, userId, date, actorId, note = 'Attendance recalculated') {
+  const punches = await activeDayPunches(ctx, userId, date);
+  const employee = await ctx.db.get(userId);
+  const extra = breakdownForDay(date, punches, null, employee);
+  const extension = await extensionFor(ctx, userId, date);
+  const calculationKey = premiumCalculationKey(date, punches);
+  const pending = { calculationKey, adjustmentDecision: 'PENDING', overtimeDecision: 'PENDING', nightDecision: 'PENDING',
+    adjustmentReason: undefined, overtimeReason: undefined, nightReason: undefined,
+    adjustmentReviewedAt: undefined, adjustmentReviewedBy: undefined, overtimeReviewedAt: undefined,
+    nightReviewedAt: undefined, overtimeReviewedBy: undefined, nightReviewedBy: undefined };
+  if (extension && extension.calculationKey !== calculationKey) {
+    await audit(ctx, actorId, 'premium_recalculated', 'extension', extension._id,
+      { note, before: extensionView(extension, employee?.name), after: extra });
+    await ctx.db.patch(extension._id, pending);
+  } else if (!extension && (extra.overtimeCandidateMinutes || extra.nightCandidateMinutes)) {
+    const source = punches.every(punch => ['ADMIN', 'SYSTEM'].includes(punch.method)) ? 'ADMIN' : 'AUTO';
+    const id = await ctx.db.insert('extensions', { userId, workDate: date,
+      continuedAt: extra.expectedTimeOutUtc || shiftInstant(date, '17:00'), source, note,
+      calculationKey, adjustmentDecision: 'PENDING', overtimeDecision: 'PENDING', nightDecision: 'PENDING' });
+    await audit(ctx, actorId, 'premium_calculated', 'extension', id, { note, ...extra });
+    return true;
+  }
+  return false;
+}
 function extensionView(row, name) {
   return { id: row._id, userId: row.userId, employeeName: name, workDate: row.workDate,
-    continuedAt: row.continuedAt, source: row.source, latitude: row.latitude ?? null,
+    calculationKey: row.calculationKey ?? null, continuedAt: row.continuedAt, source: row.source, latitude: row.latitude ?? null,
     longitude: row.longitude ?? null, accuracyM: row.accuracyM ?? null, note: row.note,
     adjustmentDecision: row.adjustmentDecision ?? 'PENDING',
     overtimeDecision: row.overtimeDecision, nightDecision: row.nightDecision,
@@ -47,7 +72,16 @@ async function extensionRows(ctx, from, to, userId) {
     : await ctx.db.query('extensions').withIndex('by_date', q => q.gte('workDate', from).lte('workDate', to)).collect();
   const names = new Map();
   for (const row of rows) if (!names.has(row.userId)) names.set(row.userId, (await ctx.db.get(row.userId))?.name || 'Unknown');
-  return rows.map(row => extensionView(row, names.get(row.userId)));
+  const views = [];
+  for (const row of rows) {
+    const punches = await activeDayPunches(ctx, row.userId, row.workDate);
+    const view = extensionView(row, names.get(row.userId));
+    if (row.calculationKey !== premiumCalculationKey(row.workDate, punches)) {
+      view.adjustmentDecision = view.overtimeDecision = view.nightDecision = 'PENDING';
+    }
+    views.push(view);
+  }
+  return views;
 }
 async function punchRows(ctx, from, to, userId) {
   const rows = userId
@@ -126,20 +160,8 @@ export const syncAutomaticPremiums = mutation({ args: { ...tokenArg, from: v.opt
     }
     let created = 0;
     for (const day of days.values()) {
-      const segments = groupPunches(day.punches);
-      if (!segments.length || segments.some(segment => !segment.inPunch || !segment.outPunch) ||
-          await extensionFor(ctx, day.userId, day.workDate)) continue;
-      const employee = await ctx.db.get(day.userId);
-      const breakdown = breakdownForDay(day.workDate, day.punches, null, employee);
-      if (!breakdown.overtimeCandidateMinutes) continue;
-      const source = day.punches.every(punch => ['ADMIN', 'SYSTEM'].includes(punch.method)) ? 'ADMIN' : 'AUTO';
-      const id = await ctx.db.insert('extensions', { userId: day.userId, workDate: day.workDate,
-        continuedAt: shiftInstant(day.workDate, '17:00'), source,
-        note: 'Overtime automatically synchronized from existing attendance',
-        adjustmentDecision: 'PENDING', overtimeDecision: 'PENDING', nightDecision: 'PENDING' });
-      await audit(ctx, admin._id, 'overtime_auto_synced', 'extension', id,
-        { workDate: day.workDate, minutes: breakdown.overtimeCandidateMinutes });
-      created++;
+      if (await syncDayPremiums(ctx, day.userId, day.workDate, admin._id,
+        'Calculated from actual attendance intervals')) created++;
     }
     return { created };
   }
@@ -229,8 +251,8 @@ export const continueOffsite = mutation({ args: { ...tokenArg, latitude: v.numbe
   handler: async (ctx, input) => {
     const user = await authUser(ctx, input.token, 'employee');
     const time = now(), local = localDateTime(time, timezone), workDate = local.date;
-    if (local.minutes < 17 * 60 || local.minutes >= 22 * 60)
-      throw new Error('Continue overtime is available from 5:00 PM until 10:00 PM.');
+    if (local.minutes < 6 * 60 || local.minutes >= 22 * 60)
+      throw new Error('Continue work is available from 6:00 AM until 10:00 PM.');
     if (holidayFor(workDate, settingsView(await settings(ctx)).holidays))
       throw new Error('This is a no-work holiday. Ask admin to record exceptional work.');
     if (!await punchFor(ctx, user._id, workDate, 'IN') || await punchFor(ctx, user._id, workDate, 'OUT'))
@@ -266,6 +288,7 @@ export const autoTimeOut = internalMutation({ args: { userId: v.id('users'), wor
       timeUtc: shiftInstant(workDate, '06:00', true), submittedAt: now(),
       note: 'Automatically closed at 6:00 AM; no exit selfie or GPS', verification: 'APPROVED', active: true });
     await audit(ctx, undefined, 'auto_time_out', 'punch', id, { workDate, cutoff: '06:00' });
+    await syncDayPremiums(ctx, userId, workDate, undefined);
     return { ok: true };
   }
 });
@@ -277,6 +300,8 @@ export const submitPunch = internalMutation({ args: { ...tokenArg, input: v.any(
   if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180 || !Number.isFinite(accuracy) || accuracy < 0) throw new Error('Current device location is required.');
   const config = await settings(ctx);
   const local = localDateTime(now(), timezone);
+  if (input.slot === 'IN' && (local.minutes < 360 || local.minutes > 960))
+    throw new Error('Time In is available between 6:00 AM and 4:00 PM. Ask admin to record exceptional work.');
   const priorDate = new Date(Date.parse(`${local.date}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
   const priorIn = local.minutes < 360 ? await punchFor(ctx, user._id, priorDate, 'IN') : null;
   const priorOpen = priorIn && !await punchFor(ctx, user._id, priorDate, 'OUT');
@@ -294,7 +319,6 @@ export const submitPunch = internalMutation({ args: { ...tokenArg, input: v.any(
   if (await punchFor(ctx, user._id, workDate, input.slot)) throw new Error('This punch is already recorded.');
   const inPunch = await punchFor(ctx, user._id, workDate, 'IN');
   if (input.slot === 'OUT' && !inPunch) throw new Error('Time In is required before Time Out. Ask admin for a correction.');
-  const extension = input.slot === 'OUT' ? await extensionFor(ctx, user._id, workDate) : null;
   const method = distance !== undefined && distance <= config.radiusM ? 'ONSITE' : 'OFFSITE';
   const note = String(input.note || '').trim().slice(0, 300) || (method === 'OFFSITE' ? 'Offsite location automatically detected' : '');
   const time = now();
@@ -309,14 +333,7 @@ export const submitPunch = internalMutation({ args: { ...tokenArg, input: v.any(
   const completedPunches = input.slot === 'OUT' ? await activeDayPunches(ctx, user._id, workDate) : [];
   const autoBreakdown = input.slot === 'OUT' ? breakdownForDay(workDate, completedPunches, null, user) : null;
   const overtimeAutoApplied = !!(autoBreakdown?.overtimeBeforeAdjustmentMinutes || autoBreakdown?.nightCandidateMinutes);
-  if (overtimeAutoApplied && !extension) {
-    const extensionId = await ctx.db.insert('extensions', { userId: user._id, workDate,
-      continuedAt: shiftInstant(workDate, '17:00'), source: 'AUTO', latitude, longitude,
-      accuracyM: accuracy, note: 'Overtime automatically detected from Time Out',
-      adjustmentDecision: 'PENDING', overtimeDecision: 'PENDING', nightDecision: 'PENDING' });
-    await audit(ctx, user._id, 'overtime_auto_applied', 'extension', extensionId,
-      { timeOut: time, method, distanceM: distance });
-  }
+  if (input.slot === 'OUT') await syncDayPremiums(ctx, user._id, workDate, user._id);
   return { punch: punchView(await ctx.db.get(id), user.name), overtimeAutoApplied };
 }});
 
@@ -358,7 +375,8 @@ export const backfill = mutation({ args: { ...tokenArg, input: v.any() }, handle
     const id = await ctx.db.insert('punches', { userId: target._id, workDate: input.workDate, slot: entry.slot,
       scheduleStart: old ? (old.scheduleStart || '08:00') : (target.scheduleStart || '08:00'),
       scheduleEnd: old ? (old.scheduleEnd || '17:00') : (target.scheduleEnd || '17:00'),
-      method: 'ADMIN', timeUtc: entry.time, submittedAt: now(), note: reason, verification: 'APPROVED',
+      method: 'ADMIN', timeUtc: entry.time, submittedAt: now(), note: reason, reason,
+      fieldAssignment: String(input.fieldAssignment || '').trim().slice(0, 300), verification: 'APPROVED',
       ...(input.offsite === undefined ? {} : { assignmentType: input.offsite ? 'OFFSITE' : 'ONSITE' }),
       createdBy: admin._id, active: true });
     await audit(ctx, admin._id, 'admin_punch_create', 'punch', id, { reason, slot: entry.slot });
@@ -369,19 +387,7 @@ export const backfill = mutation({ args: { ...tokenArg, input: v.any() }, handle
     if (old) await ctx.db.replace(old._id, value); else await ctx.db.insert('overtime', value);
     await audit(ctx, admin._id, 'overtime_set', 'overtime', `${target._id}:${input.workDate}`, { minutes: ot, reason });
   }
-  const extension = await extensionFor(ctx, target._id, input.workDate);
-  if (finalIn && finalOut && finalOut > shiftInstant(input.workDate, '17:00') && !extension) {
-    const id = await ctx.db.insert('extensions', { userId: target._id, workDate: input.workDate,
-      continuedAt: shiftInstant(input.workDate, '17:00'), source: 'ADMIN', note: reason,
-      adjustmentDecision: 'PENDING', overtimeDecision: 'PENDING', nightDecision: 'PENDING' });
-    await audit(ctx, admin._id, 'admin_extension_create', 'extension', id, { reason });
-  } else if (extension && entries.length) {
-    await ctx.db.patch(extension._id, { adjustmentDecision: 'PENDING', overtimeDecision: 'PENDING', nightDecision: 'PENDING',
-      adjustmentReason: undefined, overtimeReason: undefined, nightReason: undefined,
-      adjustmentReviewedAt: undefined, adjustmentReviewedBy: undefined, overtimeReviewedAt: undefined,
-      nightReviewedAt: undefined, overtimeReviewedBy: undefined, nightReviewedBy: undefined });
-    await audit(ctx, admin._id, 'extension_reset_after_correction', 'extension', extension._id, { reason });
-  }
+  await syncDayPremiums(ctx, target._id, input.workDate, admin._id, reason);
   return { ok: true, replaced };
 }});
 
@@ -392,7 +398,7 @@ export const saveAdminAttendanceDay = mutation({ args: { ...tokenArg, input: v.a
   if (!target || target.role !== 'employee') throw new Error('Employee not found.');
   if (!safeDate(input.workDate)) throw new Error('Valid work date is required.');
   const reason = String(input.reason || '').trim();
-  if (reason.length < 5 || reason.length > 300) throw new Error('Reason must have 5–300 characters.');
+  if (reason.length > 300) throw new Error('Reason must have at most 300 characters.');
   if (!Array.isArray(input.segments) || !input.segments.length || input.segments.length > 6)
     throw new Error('Enter one to six work intervals.');
   const existing = await activeDayPunches(ctx, target._id, input.workDate);
@@ -421,8 +427,23 @@ export const saveAdminAttendanceDay = mutation({ args: { ...tokenArg, input: v.a
     if (outUtc && outUtc > shiftInstant(input.workDate, '06:00', true))
       throw new Error('Time Out cannot exceed the 6:00 AM next-day cutoff.');
     const offsite = !!segment.offsite;
-    entries.push({ number, slot: 'IN', timeUtc: inUtc, id: segment.inId || null, offsite });
-    if (outUtc) entries.push({ number, slot: 'OUT', timeUtc: outUtc, id: segment.outId || null, offsite });
+    const oldInterval = oldByKey.get(`${number}|IN`) || oldByKey.get(`${number}|OUT`);
+    const intervalReason = String(segment.reason ?? reason ?? '').trim();
+    const fieldAssignment = String(segment.fieldAssignment ?? oldInterval?.fieldAssignment ?? '').trim();
+    if (intervalReason.length > 300 || fieldAssignment.length > 300)
+      throw new Error(`Interval ${number}: Reason and Field Assignment must be at most 300 characters.`);
+    const metadata = { offsite, reason: intervalReason, fieldAssignment,
+      metadataProvided: segment.reason !== undefined || segment.fieldAssignment !== undefined };
+    for (const [slot, timeUtc, id] of [['IN', inUtc, segment.inId], ['OUT', outUtc, segment.outId]]) {
+      if (!timeUtc) continue;
+      const old = oldByKey.get(`${number}|${slot}`);
+      const sameTime = old && localDateTime(old.timeUtc, timezone).date === localDateTime(timeUtc, timezone).date &&
+        localDateTime(old.timeUtc, timezone).time === localDateTime(timeUtc, timezone).time;
+      if ((!sameTime || metadata.metadataProvided) && intervalReason.length < 5 &&
+          (!sameTime || intervalReason !== (old.reason ?? (old.method === 'ADMIN' ? old.note : '') ?? '')))
+        throw new Error(`Interval ${number}: Reason must have 5–300 characters for an adjustment.`);
+      entries.push({ number, slot, timeUtc, id: id || null, ...metadata });
+    }
     previousOut = outUtc;
   }
   const submittedOldIds = entries.map(entry => entry.id).filter(Boolean).map(String).sort();
@@ -435,39 +456,35 @@ export const saveAdminAttendanceDay = mutation({ args: { ...tokenArg, input: v.a
       throw new Error('Attendance changed after this form opened. Reload this workday before saving.');
     const oldLocal = old ? localDateTime(old.timeUtc, timezone) : null;
     const newLocal = localDateTime(entry.timeUtc, timezone);
-    if (old && oldLocal.date === newLocal.date && oldLocal.time === newLocal.time) { preserved++; continue; }
+    if (old && oldLocal.date === newLocal.date && oldLocal.time === newLocal.time) {
+      if (entry.metadataProvided && (entry.reason !== (old.reason ?? (old.method === 'ADMIN' ? old.note : '') ?? '') ||
+          entry.fieldAssignment !== (old.fieldAssignment || '') ||
+          entry.offsite !== (old.assignmentType ? old.assignmentType === 'OFFSITE' : old.method === 'OFFSITE'))) {
+        await audit(ctx, admin._id, 'interval_details_update', 'punch', old._id, {
+          before: { reason: old.reason ?? old.note ?? '', fieldAssignment: old.fieldAssignment ?? '', assignmentType: old.assignmentType ?? old.method },
+          after: { reason: entry.reason, fieldAssignment: entry.fieldAssignment, offsite: entry.offsite }, segment: entry.number });
+        await ctx.db.patch(old._id, { reason: entry.reason, fieldAssignment: entry.fieldAssignment,
+          assignmentType: entry.offsite ? 'OFFSITE' : 'ONSITE' });
+      }
+      preserved++; continue;
+    }
     if (old) {
       await ctx.db.patch(old._id, { active: false });
       await audit(ctx, admin._id, 'punch_replaced', 'punch', old._id,
-        { reason, segment: entry.number, slot: entry.slot, replacementTime: entry.timeUtc });
+        { reason: entry.reason, fieldAssignment: entry.fieldAssignment, segment: entry.number, slot: entry.slot, replacementTime: entry.timeUtc });
       replaced++;
     }
     const id = await ctx.db.insert('punches', { userId: target._id, workDate: input.workDate,
       segment: entry.number, slot: entry.slot, method: 'ADMIN', timeUtc: entry.timeUtc,
       scheduleStart: old ? (old.scheduleStart || '08:00') : (target.scheduleStart || '08:00'),
       scheduleEnd: old ? (old.scheduleEnd || '17:00') : (target.scheduleEnd || '17:00'),
-      submittedAt: now(), note: reason, verification: 'APPROVED',
+      submittedAt: now(), note: entry.reason, reason: entry.reason, fieldAssignment: entry.fieldAssignment, verification: 'APPROVED',
       assignmentType: entry.offsite ? 'OFFSITE' : 'ONSITE', createdBy: admin._id, active: true });
     await audit(ctx, admin._id, 'admin_punch_create', 'punch', id,
-      { reason, segment: entry.number, slot: entry.slot, replacedId: old?._id || null });
+      { reason: entry.reason, fieldAssignment: entry.fieldAssignment, segment: entry.number, slot: entry.slot, replacedId: old?._id || null });
     created++;
   }
-  const active = await activeDayPunches(ctx, target._id, input.workDate);
-  const extension = await extensionFor(ctx, target._id, input.workDate);
-  const extra = breakdownForDay(input.workDate, active, extension?.continuedAt, target);
-  const hasPremium = extra.overtimeBeforeAdjustmentMinutes > 0 || extra.nightCandidateMinutes > 0;
-  if (hasPremium && !extension && (created || replaced)) {
-    const id = await ctx.db.insert('extensions', { userId: target._id, workDate: input.workDate,
-      continuedAt: shiftInstant(input.workDate, '17:00'), source: 'ADMIN', note: reason,
-      adjustmentDecision: 'PENDING', overtimeDecision: 'PENDING', nightDecision: 'PENDING' });
-    await audit(ctx, admin._id, 'admin_extension_create', 'extension', id, { reason });
-  } else if (extension && (created || replaced)) {
-    await ctx.db.patch(extension._id, { adjustmentDecision: 'PENDING', overtimeDecision: 'PENDING', nightDecision: 'PENDING',
-      adjustmentReason: undefined, overtimeReason: undefined, nightReason: undefined,
-      adjustmentReviewedAt: undefined, adjustmentReviewedBy: undefined, overtimeReviewedAt: undefined,
-      nightReviewedAt: undefined, overtimeReviewedBy: undefined, nightReviewedBy: undefined });
-    await audit(ctx, admin._id, 'extension_reset_after_correction', 'extension', extension._id, { reason });
-  }
+  await syncDayPremiums(ctx, target._id, input.workDate, admin._id, reason || 'Admin interval adjustment');
   return { ok: true, created, replaced, preserved };
 }});
 
@@ -514,32 +531,27 @@ export const approveAttendanceDay = mutation({
           reviewedBy: admin._id, reviewedAt });
       }
     }
-    const existingExtension = await extensionFor(ctx, userId, args.workDate);
-    const breakdown = breakdownForDay(args.workDate, punches, existingExtension?.continuedAt, employee);
-    if (breakdown.overtimeCandidateMinutes > 0 && !existingExtension) {
-      const source = punches.every(punch => ['ADMIN', 'SYSTEM'].includes(punch.method)) ? 'ADMIN' : 'AUTO';
-      const extensionId = await ctx.db.insert('extensions', { userId, workDate: args.workDate,
-        continuedAt: shiftInstant(args.workDate, '17:00'), source,
-        note: 'Overtime automatically detected from approved attendance',
-        adjustmentDecision: 'PENDING', overtimeDecision: 'PENDING', nightDecision: 'PENDING' });
-      await audit(ctx, admin._id, 'overtime_auto_applied', 'extension', extensionId,
-        { workDate: args.workDate, minutes: breakdown.overtimeCandidateMinutes });
-    }
+    await syncDayPremiums(ctx, userId, args.workDate, admin._id);
     await audit(ctx, admin._id, 'attendance_day_approve', 'attendance_day', `${userId}|${args.workDate}`,
       { userId, workDate: args.workDate, punchIds: punches.map(punch => punch._id) });
     return { ok: true, workDate: args.workDate };
   }
 });
 
-export const reviewExtension = mutation({ args: { ...tokenArg, id: v.string(), stage: v.string(), decision: v.string(), reason: v.optional(v.string()) },
+export const reviewExtension = mutation({ args: { ...tokenArg, id: v.string(), stage: v.string(), decision: v.string(), reason: v.optional(v.string()), calculationKey: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const admin = await authUser(ctx, args.token, 'admin');
     if (!['ADJUSTMENT', 'OVERTIME', 'NIGHT'].includes(args.stage) || !['APPROVED', 'REJECTED'].includes(args.decision))
       throw new Error('Choose a valid approval decision.');
     const reason = String(args.reason || '').trim();
     if (reason.length > 300) throw new Error('Reason must be at most 300 characters.');
-    const id = ctx.db.normalizeId('extensions', args.id), extension = id && await ctx.db.get(id);
+    const id = ctx.db.normalizeId('extensions', args.id);
+    let extension = id && await ctx.db.get(id);
     if (!extension) throw new Error('Offsite extension not found.');
+    await syncDayPremiums(ctx, extension.userId, extension.workDate, admin._id);
+    extension = await ctx.db.get(id);
+    if (args.calculationKey && args.calculationKey !== extension.calculationKey)
+      throw new Error('Attendance calculations changed. Reload the review before approving.');
     const punches = await activeDayPunches(ctx, extension.userId, extension.workDate);
     const segments = groupPunches(punches);
     if (!segments.length || segments.some(segment => !segment.inPunch || !segment.outPunch))
@@ -552,8 +564,6 @@ export const reviewExtension = mutation({ args: { ...tokenArg, id: v.string(), s
       throw new Error('No remaining overtime is available after adjustment.');
     if (args.stage === 'NIGHT' && !breakdown.nightCandidateMinutes)
       throw new Error('No Differential hours were recorded.');
-    if (args.stage === 'NIGHT' && breakdown.remainingOvertimeMinutes > 0 && extension.overtimeDecision !== 'APPROVED')
-      throw new Error('Approve overtime before reviewing Differential.');
     if (args.decision === 'APPROVED' && punches.some(punch => punch.verification !== 'APPROVED'))
       throw new Error('Approve the employee Time In and Time Out proofs first.');
     const changes = args.stage === 'ADJUSTMENT'
@@ -561,9 +571,7 @@ export const reviewExtension = mutation({ args: { ...tokenArg, id: v.string(), s
           adjustmentReviewedBy: admin._id, adjustmentReviewedAt: now() }
       : args.stage === 'OVERTIME'
       ? { overtimeDecision: args.decision, overtimeReason: reason || undefined,
-          overtimeReviewedBy: admin._id, overtimeReviewedAt: now(),
-          ...(args.decision === 'REJECTED' ? { nightDecision: 'REJECTED', nightReason: 'Overtime denied',
-            nightReviewedBy: admin._id, nightReviewedAt: now() } : {}) }
+          overtimeReviewedBy: admin._id, overtimeReviewedAt: now() }
       : { nightDecision: args.decision, nightReason: reason || undefined,
           nightReviewedBy: admin._id, nightReviewedAt: now() };
     await ctx.db.patch(id, changes);
@@ -695,13 +703,37 @@ export const updateEmployee = internalMutation({ args: { token: v.string(), id: 
   const mobile = input.mobile.trim();
   const other = await userByMobile(ctx, mobile);
   if (other && other._id !== userId) throw new Error('Mobile number is already in use.');
+  const effectiveDate = input.scheduleEffectiveDate || dayNow();
+  if (!safeDate(effectiveDate) || effectiveDate > dayNow())
+    throw new Error('Schedule effective date must be today or an earlier date.');
+  const scheduleChanged = old.scheduleStart !== input.scheduleStart || old.scheduleEnd !== input.scheduleEnd;
+  const credentialsChanged = input.passwordHash || !input.active || old.mobile !== mobile;
+  const before = userView(old);
   await ctx.db.patch(userId, { name: input.name.trim(), mobile, email: undefined, scheduleStart: input.scheduleStart,
     scheduleEnd: input.scheduleEnd, workdays: input.workdays, graceMinutes: 0,
     active: !!input.active, isDemo: undefined, ...(input.passwordHash ? { passwordHash: input.passwordHash } : {}) });
-  const sessions = await ctx.db.query('sessions').withIndex('by_user', q => q.eq('userId', userId)).collect();
-  for (const session of sessions) await ctx.db.delete(session._id);
+  if (scheduleChanged || input.scheduleEffectiveDate) {
+    const rows = await ctx.db.query('punches').withIndex('by_user_date', q =>
+      q.eq('userId', userId).gte('workDate', effectiveDate)).collect();
+    const days = new Set();
+    for (const punch of rows.filter(row => row.active)) {
+      if (punch.scheduleStart === input.scheduleStart && punch.scheduleEnd === input.scheduleEnd) continue;
+      await audit(ctx, admin._id, 'attendance_schedule_update', 'punch', punch._id, {
+        workDate: punch.workDate, effectiveDate,
+        before: { scheduleStart: punch.scheduleStart || '08:00', scheduleEnd: punch.scheduleEnd || '17:00' },
+        after: { scheduleStart: input.scheduleStart, scheduleEnd: input.scheduleEnd },
+        originalTimeUtc: punch.timeUtc });
+      await ctx.db.patch(punch._id, { scheduleStart: input.scheduleStart, scheduleEnd: input.scheduleEnd });
+      days.add(punch.workDate);
+    }
+    for (const date of days) await syncDayPremiums(ctx, userId, date, admin._id, 'Schedule adjusted');
+  }
+  if (credentialsChanged) {
+    const sessions = await ctx.db.query('sessions').withIndex('by_user', q => q.eq('userId', userId)).collect();
+    for (const session of sessions) await ctx.db.delete(session._id);
+  }
   const updated = await ctx.db.get(userId);
-  await audit(ctx, admin._id, 'employee_update', 'user', userId, { before: userView(old), after: userView(updated) });
+  await audit(ctx, admin._id, 'employee_update', 'user', userId, { before, after: userView(updated), effectiveDate });
   return { employee: userView(updated) };
 }});
 export const deleteEmployee = mutation({ args: { token: v.string(), id: v.string() }, handler: async (ctx, { token, id }) => {

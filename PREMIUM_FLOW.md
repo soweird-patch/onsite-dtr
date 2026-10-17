@@ -1,28 +1,31 @@
-# Regular, overtime, and Differential hours
+# Regular hours, overtime, and night differential
 
-This is the DTR's recording and approval workflow. It records time for payroll review; it does not calculate pay rates or deductions. All clock times below use Asia/Manila.
+The DTR records hours for payroll review; it does not calculate pay rates or deductions. All times use Asia/Manila.
 
-## One shift, three windows
+## Actual working hours
 
-| Window | Recorded rule | Approval |
-| --- | --- | --- |
-| Assigned Standard or Custom schedule | Up to 8 actual regular hours. The 12:00–1:00 PM unpaid break and gaps between punch intervals do not count. | Admin approves the complete daily attendance before it enters payroll. |
-| 5:00–10:00 PM outside the assigned schedule | Actual OT is calculated without duplicating scheduled regular minutes. The system reserves only the amount needed to complete 8 regular hours, then shows the remaining OT. | Admin separately approves the regular-time adjustment and the remaining OT. |
-| After 10:00 PM–6:00 AM | The worked portion is also recorded separately as Night differential. | Admin reviews Night differential after overtime is approved. |
+Employees can clock in between **6:00 AM and 4:00 PM**, inclusive. Admins can record exceptional work outside that window.
 
-## Employee flow
+The first **480 actual working minutes** in the workday are regular time. The company **12:00-1:00 PM unpaid lunch** and gaps between recorded intervals are excluded. Overlapping intervals never count twice. Less than 480 minutes creates undertime; every additional working minute is pending OT, including time before 5:00 PM and time worked overnight. Night differential independently counts actual work from **10:00 PM to 6:00 AM**, including exceptional work before 6:00 AM on the work date. A workday closes no later than 6:00 AM the next day.
 
-1. Time In as usual with selfie and GPS. The shift belongs to that work date even when it crosses midnight.
-2. Time Out automatically creates a review when eligible work exists in the 5:00–10:00 PM window. No separate overtime button is needed.
-3. Finish with **Time Out**, which still needs a selfie and GPS. The saved server Time Out determines the exact automatic OT and Night differential candidates; an incomplete day does not enter payroll.
-4. Attendance history always shows the actual punch times, calculated candidate minutes, and each approval state. A 5:13 PM exit creates 13 minutes of pending overtime.
+For example, 7:40 AM to 4:50 PM, excluding lunch, gives **8 regular hours and 10 minutes pending OT**. Expected Time Out is **4:40 PM**. A 4:00 PM arrival with no further breaks completes eight hours at midnight. Expected Time Out accounts for completed intervals and projects the rest assuming no further unpaid gaps.
 
-## Admin flow
+## Schedule and attendance edits
 
-1. In **Records**, inspect the offsite Time In and Time Out proof and approve or reject each offsite punch.
-2. In **Overtime & Differential review**, first approve or reject the proposed OT-to-regular transfer, then separately approve or reject the remaining OT. A reason is optional and saved in the audit trail. Approval requires all punch proofs to be approved.
-3. If Night differential minutes exist after 10:00 PM, approve or reject them separately. Night differential approval requires overtime approval. Rejecting a punch or overtime removes that premium credit.
-4. In **Add attendance**, selecting an employee and work date loads that day's active punches into editable fields. Unchanged times keep their original selfie, GPS, and verification. An edited time becomes an audited admin correction. Use **Add another Time In / Time Out** when the employee returns to work after an earlier Time Out; mark an overnight punch as next day and any new field interval as offsite. The gaps between intervals are excluded from worked hours. A reason is required, while selfie and GPS are optional for admin-created punches.
-5. **Reports** prints or saves a PDF for the selected cutoff. Each employee has dated actual punches, regular hours, late and undertime, granted overtime and Differential, review states, and totals. Pending and denied premium minutes are excluded from granted totals; the exceptions remain visible for review.
+When editing an employee, choose **Apply schedule from** (today by default, or an earlier date). Saving updates all active attendance intervals on that date and later dates, including today's open shift, in the same transaction. Actual hours are recalculated using the shared rules. Scheduled start/end times are planning metadata; they do not truncate actual work. Original punch timestamps, selfies, GPS, and verification remain intact. Each schedule adjustment records the previous and new schedule in the audit log. A schedule-only edit keeps the employee signed in.
 
-Corrections retain the old punch in the audit history and reset extra-hour approvals. Existing administrator-entered overtime from the previous version remains visible as already granted in reports.
+In **Add attendance**, select an employee and work date to load active punches. Each interval has its own **Reason** and **Field Assignment**. A reason of 5-300 characters is required for new or adjusted times; Field Assignment is optional and limited to 300 characters. Changing interval details is audited and preserves the original proof. Editing a time retires the old active punch and creates an admin correction, keeping the original record. Add another interval for a return to work; the intervening gap is unpaid.
+
+## Review before payroll
+
+Saving Time Out, correcting intervals, applying schedule edits, and approving a workday synchronize pending premiums. Opening Records or Reports also synchronizes older records, including night-only work. Existing reviews from the former calculation rules return to pending once.
+
+The admin approves the complete daily attendance first, then reviews calculated **OT** and **Night differential** independently. Both can be approved or rejected, with optional audit reasons. Rejecting attendance proof excludes its workday from payroll. OT rejection does not automatically reject night differential. The first eight actual working hours become regular time automatically; the former OT-to-regular transfer stage is no longer needed.
+
+Approvals are bound to the exact intervals and saved schedule. Changes reopen affected premium reviews and clear their previous review details while retaining the audit history. An open review form cannot approve a changed calculation. Pending, rejected, stale, and legacy manual OT grants do not enter premium payroll totals. An unchanged synchronization does not reset an approval. Changes to interval notes alone preserve approvals because the worked time is unchanged.
+
+Attendance, approval screens, and reports receive live changes from Convex.
+
+## PDF report
+
+**Print / Save PDF** includes the attendance summary followed by a **Reasons and Field Assignments** table with **Date, Time In, Time Out, Reason, Field Assignment**. Every annotated interval appears, including pending and incomplete records; missing times display a dash. Older punch notes also appear, and punches with different notes are listed separately so neither note is lost. Text wraps, headers repeat across pages, and rows stay together. Approved totals use the same calculation and approval checks as the review workflow.

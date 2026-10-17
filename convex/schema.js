@@ -35,11 +35,13 @@ export default defineSchema({
     note: v.string(), verification: v.union(v.literal('PENDING'), v.literal('APPROVED'), v.literal('REJECTED')),
     rejectionReason: v.optional(v.string()), createdBy: v.optional(v.id('users')),
     assignmentType: v.optional(v.union(v.literal('ONSITE'), v.literal('OFFSITE'))),
+    reason: v.optional(v.string()), fieldAssignment: v.optional(v.string()),
     reviewedBy: v.optional(v.id('users')), reviewedAt: v.optional(v.string()),
     siteVersion: v.optional(v.number()), active: v.boolean()
   }).index('by_date', ['workDate']).index('by_user_date', ['userId', 'workDate']),
   extensions: defineTable({
     userId: v.id('users'), workDate: v.string(), continuedAt: v.string(),
+    calculationKey: v.optional(v.string()),
     source: v.union(v.literal('OFFSITE'), v.literal('ADMIN'), v.literal('AUTO')),
     latitude: v.optional(v.number()), longitude: v.optional(v.number()),
     accuracyM: v.optional(v.number()), note: v.string(),

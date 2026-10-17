@@ -121,3 +121,17 @@ body{background:radial-gradient(circle at 12% -10%,#12334b 0,transparent 32%),va
 /* Admin attendance editor: one workday may contain several separate work intervals. */
 .manual-interval-list{display:grid;gap:12px;margin:15px 0}.manual-interval{padding:14px;border:1px solid #315268;border-radius:15px;background:#0b2233}.manual-interval-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;color:#e6f6f5}.manual-interval-head strong{font-size:.82rem}.manual-options{display:grid;gap:5px;margin-top:5px}.manual-options .check-row{margin:4px 0}.manual-interval .tiny-label{margin:9px 0 0}.proof-interval-title{margin:16px 0 9px;padding:8px 11px;border-radius:9px;background:#123546;color:#9ee8db;font-size:.75rem;letter-spacing:.04em}.proof-interval-title:first-child{margin-top:0}.proof-modal>.btn{margin-top:16px}
 .manual-saved-proof{display:grid;gap:6px;margin-top:12px;padding:10px 11px;border-radius:10px;background:#123745;color:#cce5e8;font-size:.68rem}.manual-saved-proof a{margin-left:8px;color:var(--teal);font-weight:800;text-decoration:none}
+.report-details-title{margin:22px 0 10px;color:#123b48;font-size:1rem;break-after:avoid}
+.report-sheet .report-details td{white-space:pre-wrap;overflow-wrap:anywhere;vertical-align:top}
+@media print{
+  html,body{background:#fff!important;color:#111;color-scheme:light}
+  .report-sheet .table tr{break-inside:avoid;page-break-inside:avoid}
+  .report-sheet .report-details-wrap{overflow:visible;break-inside:auto;border-radius:0}
+  .report-sheet .report-details{table-layout:fixed;break-inside:auto}
+  .report-sheet .report-details thead{display:table-header-group}
+  .report-sheet .report-details tr{break-inside:avoid;page-break-inside:avoid}
+  .report-sheet .report-details th,.report-sheet .report-details td{font-size:9px;line-height:1.4;padding:2mm}
+  .report-sheet .report-details th:nth-child(1){width:12%}
+  .report-sheet .report-details th:nth-child(2),.report-sheet .report-details th:nth-child(3){width:12%}
+  .report-sheet .report-details th:nth-child(4),.report-sheet .report-details th:nth-child(5){width:32%}
+}

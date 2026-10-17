@@ -9,7 +9,7 @@ Ang reference UI ay ang ipinadalang dark navy/teal mobile dashboard: greeting sa
 ## 2. Mga kailangang i-set ng admin bago gamitin
 
 1. **Payroll cutoff:** start/end day ng dalawang period bawat buwan (sample mula sa screenshot: 11–25 at 26–10). Inclusive ang dates; dapat tama rin ang period na tumatawid ng buwan o taon.
-2. **Work schedule:** Standard 8:00 AM–5:00 PM o Custom start/end per employee; excluded ang 12:00–1:00 PM unpaid break, kasama ang configured workdays at Asia/Manila timezone. Ang shortage ay maaaring punan mula sa eligible 5:00–10:00 PM OT pagkatapos ng hiwalay na admin approval. Tingnan ang [regular at premium workflow](PREMIUM_FLOW.md).
+2. **Work schedule:** Standard 8:00 AM–5:00 PM o Custom start/end per employee; excluded ang 12:00–1:00 PM unpaid break, kasama ang configured workdays at Asia/Manila timezone. Time In ay puwede mula 6:00 AM hanggang 4:00 PM. Ang unang 8 actual working hours ay regular; ang sobra ay pending OT kahit bago 5:00 PM. Schedule changes apply immediately from the chosen effective date and reset affected premium reviews. Tingnan ang [regular at premium workflow](PREMIUM_FLOW.md).
 3. **Nag-iisang onsite location:** admin ang magse-set at mag-a-update ng site name/address, GPS pin (latitude/longitude), at allowed radius/geofence. Itatala ang history ng pin/radius changes para hindi maiba ang interpretasyon ng lumang punches.
 4. **Employee accounts:** full name, employee ID, status, role, at assigned schedule. Admin ang gagawa at magdi-disable ng account.
 5. **Verification policy:** sino ang puwedeng mag-approve ng offsite entries at ilang araw bago ma-lock ang cutoff.
@@ -77,7 +77,7 @@ Create/edit/disable employee; assign employee ID, schedule, at initial login ins
 ### E. Cutoff review at payroll print
 
 1. Piliin ang cutoff at employee/all employees. Ipakita ang incomplete, pending verification, rejected, at admin-created exceptions bago i-finalize.
-2. Payroll report: app/header, cutoff date span, print date, employee name, per-day actual In/Out source/time, regular hours, late, undertime, granted overtime, Differential, at review status. May totals bawat employee.
+2. Payroll report: app/header, cutoff date span, print date, employee name, per-day actual In/Out source/time, regular hours, late, undertime, granted overtime, Differential, at review status. May totals bawat employee. Below the attendance summary, a paginated table lists Date, Time In, Time Out, Reason, and Field Assignment for every annotated interval.
 3. Print-friendly view na maaaring i-save bilang PDF gamit ang browser print dialog. Nasa record detail ang selfie/map proof; hindi ito isinasama sa regular payroll summary.
 4. Kapag na-finalize ang cutoff, lock ang edits sa ordinary flow; admin correction lamang na may audit trail at regenerated report version.
 
@@ -88,8 +88,8 @@ Create/edit/disable employee; assign employee ID, schedule, at initial login ins
 | Wala pang AM In | Ipakita ang Time In action. |
 | May AM In, wala pang PM Out | Ipakita ang Time Out action; status **Incomplete** hanggang makumpleto. |
 | May parehong punches | Status **Present** kung valid; late/undertime ay hiwalay na minutes. |
-| Time In lampas shift start | **Late** = lagpas na minuto. I-allow pa rin ang punch. |
-| Time Out bago 5:00 PM | **Undertime** = kulang na minuto hanggang 5:00 PM. I-allow pa rin ang punch. |
+| Time In mula 6:00 AM hanggang 4:00 PM | Flexible arrival; expected Time Out follows 8 actual working hours, excluding unpaid lunch and gaps. |
+| Time Out bago makumpleto ang 8 actual working hours | **Undertime** = 480 minus actual working minutes. Time beyond 8 working hours is pending OT, including before 5:00 PM. |
 | Walang punch matapos ang scheduled shift | **No record / possible absence**, para i-review ng admin. Hindi agad payroll-final kung may leave/holiday/exemption. |
 | Offsite proof | **Pending verification** hanggang approve/reject ng admin. |
 | Admin backfill | **Created by admin**, may required reason; walang selfie requirement. |
@@ -103,7 +103,7 @@ Ang oras sa regular, overtime, at Differential windows ay nasa [premium workflow
 - **Site settings:** iisang active site, coordinates, radius, effective dates/version, at admin change history.
 - **Schedule:** Asia/Manila timezone, Standard 8:00 AM–5:00 PM o Custom start/end, at workdays; walang grace period.
 - **Cutoff:** start/end dates, state (open/finalized), report version.
-- **Attendance event:** employee, work date, slot (AM In/PM Out), official timestamp, source (`onsite`/`offsite`/`admin`), device capture time, site settings version/geofence result, coordinates and accuracy, selfie reference, verification state, admin reason, creator/reviewer, timestamps.
+- **Attendance event:** employee, work date, slot (AM In/PM Out), official timestamp, source (`onsite`/`offsite`/`admin`), device capture time, site settings version/geofence result, coordinates and accuracy, selfie reference, verification state, interval-specific reason and field assignment, creator/reviewer, timestamps.
 - **Audit log:** login/session activity as appropriate, punch submission, approval/rejection, admin backfill, correction, cutoff finalization, and export/print.
 
 Selfie at precise location ay sensitive data: role-based access, encrypted storage/transfer, limited retention, at access logging. Sa login at capture screens, ipaliwanag kung bakit kinukuha ang location at image.

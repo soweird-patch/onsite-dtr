@@ -36,15 +36,13 @@ export function cutoffFor(dateString, startDays = [11, 26]) {
 }
 
 export function attendanceMinutes(inUtc, outUtc, scheduleStart, scheduleEnd, timeZone) {
-  const start = clockMinutes(scheduleStart), end = clockMinutes(scheduleEnd);
-  const inMinute = inUtc ? localDateTime(inUtc, timeZone).minutes : null;
-  const required = Math.min(REQUIRED_REGULAR_MINUTES, Math.max(0, end - start));
+  clockMinutes(scheduleStart); clockMinutes(scheduleEnd);
+  const required = REQUIRED_REGULAR_MINUTES;
   const date = inUtc ? localDateTime(inUtc, timeZone).date : null;
   const worked = date && outUtc ? workBreakdown(date, inUtc, outUtc, null, scheduleStart, scheduleEnd).regularMinutes : 0;
   const shortfall = outUtc ? Math.max(0, required - worked) : 0;
-  const arrivalDelay = inMinute === null ? 0 : Math.max(0, inMinute - start);
   return {
-    late: Math.min(arrivalDelay, shortfall),
+    late: 0,
     early: shortfall
   };
 }
@@ -84,58 +82,48 @@ function overlapMinutes(start, end, windowStart, windowEnd) {
   return Math.max(0, Math.floor((Math.min(end, windowEnd) - Math.max(start, windowStart)) / 60000));
 }
 
-function breakdownWindows(date, scheduleStart, scheduleEnd) {
-  const regularStart = Date.parse(shiftInstant(date, scheduleStart));
-  const regularEnd = Date.parse(shiftInstant(date, scheduleEnd));
-  const breakStart = Date.parse(shiftInstant(date, BREAK_START));
-  const breakEnd = Date.parse(shiftInstant(date, BREAK_END));
-  return { regularStart, regularEnd, breakStart, breakEnd,
-    overtimeStart: Date.parse(shiftInstant(date, REGULAR_END)),
-    overtimeEnd: Date.parse(shiftInstant(date, OVERTIME_END)),
-    nightEnd: Date.parse(shiftInstant(date, NIGHT_END, true)) };
+// Payroll uses actual worked time. Scheduled clock times are planning metadata.
+// The company unpaid lunch is 12:00–13:00; recorded gaps are also unpaid.
+function paidIntervals(date, intervals) {
+  const lunchStart = Date.parse(shiftInstant(date, BREAK_START));
+  const lunchEnd = Date.parse(shiftInstant(date, BREAK_END));
+  const cutoff = Date.parse(shiftInstant(date, NIGHT_END, true));
+  const merged = [];
+  for (const item of intervals.filter(item => item.inUtc && item.outUtc)
+    .map(item => ({ start: Date.parse(item.inUtc), end: Math.min(Date.parse(item.outUtc), cutoff) }))
+    .filter(item => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start)
+    .sort((a, b) => a.start - b.start)) {
+    const last = merged.at(-1);
+    if (last && item.start <= last.end) last.end = Math.max(last.end, item.end);
+    else merged.push({ ...item });
+  }
+  return merged.flatMap(({ start, end }) => [
+    { start, end: Math.min(end, lunchStart) },
+    { start: Math.max(start, lunchEnd), end }
+  ].filter(item => item.end > item.start));
 }
 
-function finalizeBreakdown(regularMinutes, overtimeBeforeAdjustmentMinutes, nightCandidateMinutes) {
-  regularMinutes = Math.min(REQUIRED_REGULAR_MINUTES, regularMinutes);
-  const shortageMinutes = Math.max(0, REQUIRED_REGULAR_MINUTES - regularMinutes);
-  const proposedTransferMinutes = Math.min(shortageMinutes, overtimeBeforeAdjustmentMinutes);
-  const remainingOvertimeMinutes = Math.max(0, overtimeBeforeAdjustmentMinutes - proposedTransferMinutes);
-  return { regularMinutes, shortageMinutes, undertimeMinutes: shortageMinutes,
-    overtimeBeforeAdjustmentMinutes, proposedTransferMinutes,
-    resultingRegularMinutes: regularMinutes + proposedTransferMinutes,
-    remainingOvertimeMinutes, overtimeCandidateMinutes: overtimeBeforeAdjustmentMinutes,
-    nightCandidateMinutes, overtimeEligible: overtimeBeforeAdjustmentMinutes >= MIN_OVERTIME_MINUTES };
-}
-
-function scheduledMinutes(start, end, windows) {
-  return overlapMinutes(start, end, windows.regularStart, windows.regularEnd) -
-    overlapMinutes(start, end, Math.max(windows.regularStart, windows.breakStart),
-      Math.min(windows.regularEnd, windows.breakEnd));
-}
-
-function overtimeMinutes(start, end, windows) {
-  const raw = overlapMinutes(start, end, windows.overtimeStart, windows.overtimeEnd);
-  const scheduledOverlap = overlapMinutes(start, end,
-    Math.max(windows.overtimeStart, windows.regularStart),
-    Math.min(windows.overtimeEnd, windows.regularEnd));
-  return Math.max(0, raw - scheduledOverlap);
+export function expectedTimeOut(date, intervals = []) {
+  let remaining = REQUIRED_REGULAR_MINUTES * 60000;
+  for (const item of paidIntervals(date, intervals)) {
+    if (item.end - item.start >= remaining) return new Date(item.start + remaining).toISOString();
+    remaining -= item.end - item.start;
+  }
+  const last = intervals.filter(item => Number.isFinite(Date.parse(item.inUtc)) &&
+    (!item.outUtc || Number.isFinite(Date.parse(item.outUtc)))).at(-1);
+  if (!last) return null;
+  let start = Date.parse(last.outUtc || last.inUtc);
+  const lunchStart = Date.parse(shiftInstant(date, BREAK_START));
+  const lunchEnd = Date.parse(shiftInstant(date, BREAK_END));
+  if (start >= lunchStart && start < lunchEnd) start = lunchEnd;
+  let end = start + remaining;
+  if (start < lunchStart && end > lunchStart) end += lunchEnd - lunchStart;
+  return new Date(end).toISOString();
 }
 
 export function workBreakdown(date, inUtc, outUtc, continuedAtUtc = null,
   scheduleStart = REGULAR_START, scheduleEnd = REGULAR_END) {
-  const empty = finalizeBreakdown(0, 0, 0);
-  if (!inUtc || !outUtc) return empty;
-  const start = Date.parse(inUtc), out = Date.parse(outUtc);
-  if (!Number.isFinite(start) || !Number.isFinite(out) || out <= start) return empty;
-  const windows = breakdownWindows(date, scheduleStart, scheduleEnd);
-  const previousDate = new Date(Date.parse(`${date}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
-  const earlyNightStart = Date.parse(shiftInstant(previousDate, OVERTIME_END));
-  const earlyNightEnd = Date.parse(shiftInstant(date, NIGHT_END));
-  const regularMinutes = scheduledMinutes(start, out, windows);
-  const overtimeBeforeAdjustmentMinutes = overtimeMinutes(start, out, windows);
-  const nightCandidateMinutes = overlapMinutes(start, out, earlyNightStart, earlyNightEnd) +
-    overlapMinutes(start, out, windows.overtimeEnd, windows.nightEnd);
-  return finalizeBreakdown(regularMinutes, overtimeBeforeAdjustmentMinutes, nightCandidateMinutes);
+  return workBreakdownIntervals(date, [{ inUtc, outUtc }], continuedAtUtc, scheduleStart, scheduleEnd);
 }
 
 export function groupPunches(punches = []) {
@@ -153,27 +141,46 @@ export function isPayrollDayReady(punches) {
   return segments.length > 0 && segments.every(({ inPunch, outPunch }) => isPayrollReady(inPunch, outPunch));
 }
 
-// Count only time inside recorded work intervals. Gaps between punches never earn hours.
-export function workBreakdownIntervals(date, intervals, continuedAtUtc = null,
+// Merge overlaps defensively so a minute can never be paid twice.
+export function workBreakdownIntervals(date, intervals = [], continuedAtUtc = null,
   scheduleStart = REGULAR_START, scheduleEnd = REGULAR_END) {
-  const complete = intervals.filter(item => item.inUtc && item.outUtc)
-    .map(item => ({ start: Date.parse(item.inUtc), end: Date.parse(item.outUtc) }))
-    .filter(item => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start)
-    .sort((a, b) => a.start - b.start);
-  if (complete.length === 1) return workBreakdown(date, new Date(complete[0].start).toISOString(),
-    new Date(complete[0].end).toISOString(), continuedAtUtc, scheduleStart, scheduleEnd);
-  if (!complete.length) return workBreakdown(date, null, null, continuedAtUtc, scheduleStart, scheduleEnd);
-  const windows = breakdownWindows(date, scheduleStart, scheduleEnd);
-  const previousDate = new Date(Date.parse(`${date}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
-  const earlyNightStart = Date.parse(shiftInstant(previousDate, OVERTIME_END));
+  const paid = paidIntervals(date, intervals);
+  const workedMinutes = Math.floor(paid.reduce((sum, item) => sum + item.end - item.start, 0) / 60000);
+  const regularMinutes = Math.min(REQUIRED_REGULAR_MINUTES, workedMinutes);
+  const overtimeMinutes = Math.max(0, workedMinutes - REQUIRED_REGULAR_MINUTES);
+  const earlyNightStart = Date.parse(shiftInstant(date, '00:00'));
   const earlyNightEnd = Date.parse(shiftInstant(date, NIGHT_END));
-  const regularMinutes = complete.reduce((sum, item) => sum + scheduledMinutes(item.start, item.end, windows), 0);
-  const overtimeBeforeAdjustmentMinutes = complete.reduce((sum, item) =>
-    sum + overtimeMinutes(item.start, item.end, windows), 0);
-  const nightCandidateMinutes = complete.reduce((sum, item) => sum +
+  const nightStart = Date.parse(shiftInstant(date, OVERTIME_END));
+  const nightEnd = Date.parse(shiftInstant(date, NIGHT_END, true));
+  const nightCandidateMinutes = paid.reduce((sum, item) => sum +
     overlapMinutes(item.start, item.end, earlyNightStart, earlyNightEnd) +
-    overlapMinutes(item.start, item.end, windows.overtimeEnd, windows.nightEnd), 0);
-  return finalizeBreakdown(regularMinutes, overtimeBeforeAdjustmentMinutes, nightCandidateMinutes);
+    overlapMinutes(item.start, item.end, nightStart, nightEnd), 0);
+  const shortageMinutes = REQUIRED_REGULAR_MINUTES - regularMinutes;
+  return { workedMinutes, regularMinutes, shortageMinutes, undertimeMinutes: shortageMinutes,
+    overtimeBeforeAdjustmentMinutes: overtimeMinutes, proposedTransferMinutes: 0,
+    resultingRegularMinutes: regularMinutes, remainingOvertimeMinutes: overtimeMinutes,
+    overtimeCandidateMinutes: overtimeMinutes, nightCandidateMinutes,
+    overtimeEligible: overtimeMinutes >= MIN_OVERTIME_MINUTES,
+    expectedTimeOutUtc: expectedTimeOut(date, intervals) };
+}
+
+export function premiumCalculationKey(date, punches) {
+  return JSON.stringify(['actual-hours-v1', date, groupPunches(punches).map(group => [
+    group.inPunch?.timeUtc || null, group.outPunch?.timeUtc || null,
+    group.inPunch?.scheduleStart || REGULAR_START, group.inPunch?.scheduleEnd || REGULAR_END
+  ])]);
+}
+
+export function payrollDayTotals(date, punches, extension) {
+  const hours = workBreakdownIntervals(date, groupPunches(punches).map(group => ({
+    inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc
+  })));
+  const ready = isPayrollDayReady(punches);
+  const reviewed = extension?.calculationKey === premiumCalculationKey(date, punches);
+  return { regular: ready ? hours.regularMinutes : 0,
+    undertime: ready ? hours.undertimeMinutes : 0,
+    overtime: ready && reviewed && extension.overtimeDecision === 'APPROVED' ? hours.overtimeCandidateMinutes : 0,
+    night: ready && reviewed && extension.nightDecision === 'APPROVED' ? hours.nightCandidateMinutes : 0 };
 }
 
 export function holidayFor(date, holidays = []) {
