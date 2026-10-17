@@ -135,3 +135,5 @@ body{background:radial-gradient(circle at 12% -10%,#12334b 0,transparent 32%),va
   .report-sheet .report-details th:nth-child(2),.report-sheet .report-details th:nth-child(3){width:12%}
   .report-sheet .report-details th:nth-child(4),.report-sheet .report-details th:nth-child(5){width:32%}
 }
+.report-pending{display:block;margin-top:4px;color:#875800;font-size:.68rem;line-height:1.4;font-weight:650;white-space:normal}
+@media print{.report-pending{font-size:7px;color:#704900}}

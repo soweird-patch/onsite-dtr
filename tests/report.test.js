@@ -86,3 +86,27 @@ test('payroll report totals include regular top-up and approved premiums without
   totals=app.reportRows()[0].totals;
   assert.deepEqual([totals.regular,totals.undertime,totals.overtime,totals.night],[360,120,0,120]);
 });
+
+test('report shows employee/admin source and pending OT separately from approved payroll hours', () => {
+  const app=appHarness(), fixture=reportFixture(1,1),date='2026-10-01',punches=fixture.rows[0].punches;
+  punches[0].method='ONSITE'; punches[0].timeUtc=`${date}T00:18:47.994Z`;
+  punches[1].method='OFFSITE'; punches[1].timeUtc=`${date}T11:04:00.654Z`;
+  const extension={userId:'worker',workDate:date,calculationKey:premiumCalculationKey(date,punches),overtimeDecision:'PENDING',nightDecision:'PENDING'};
+  Object.assign(app.state,{employees:[fixture.employee],reportRange:{start:date,end:date},
+    session:{today:date,user:{role:'admin'},settings:{holidays:[]}},adminData:{punches,extensions:[extension],overtime:[]}});
+  let report=app.reportRows()[0];
+  assert.equal(report.totals.regular,480);
+  assert.equal(report.totals.overtime,0);
+  assert.equal(report.totals.pendingOvertime,105);
+  let html=app.renderReportEmployee(report,{start:date,end:date},'QA',true);
+  assert.ok(html.includes('Employee · Onsite / Employee · Offsite'));
+  assert.ok(html.includes('Pending OT: 1h 45m'));
+  extension.overtimeDecision='APPROVED';
+  report=app.reportRows()[0];
+  assert.equal(report.totals.overtime,105);
+  assert.equal(report.totals.pendingOvertime,0);
+  punches[1].method='ADMIN'; punches[1].assignmentType='OFFSITE';
+  html=app.renderReportEmployee(app.reportRows()[0],{start:date,end:date},'QA',true);
+  assert.ok(html.includes('Employee · Onsite / Admin'));
+  assert.ok(!html.includes('Admin offsite'));
+});

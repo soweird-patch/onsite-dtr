@@ -1,4 +1,4 @@
-import { cutoffFor, distanceMeters, localDateTime, clockMinutes, safeDate } from '../rules.js';
+import { cutoffFor, distanceMeters, localDateTime, clockMinutes, safeDate, punchProvenance } from '../rules.js';
 import { noWorkHolidays, philippineHolidays } from '../philippineHolidays.js';
 
 export { distanceMeters, localDateTime, clockMinutes, safeDate };
@@ -33,6 +33,7 @@ export function userView(row) {
 export function punchView(row, name) {
   return { id: row._id, userId: row.userId, employeeName: name,
     workDate: row.workDate, slot: row.slot, segment: row.segment || 1, method: row.method, timeUtc: row.timeUtc,
+    ...punchProvenance(row),
     scheduleStart: row.scheduleStart ?? null, scheduleEnd: row.scheduleEnd ?? null,
     submittedAt: row.submittedAt, latitude: row.latitude ?? null, longitude: row.longitude ?? null,
     accuracyM: row.accuracyM ?? null, distanceM: row.distanceM ?? null,

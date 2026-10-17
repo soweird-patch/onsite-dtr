@@ -7,6 +7,7 @@ import { approveAttendanceDay, autoTimeOut, backfill, continueOffsite, reviewExt
   saveAdminAttendanceDay, submitPunch, updateEmployee, verify, createEmployee, userForLogin,
   migrateEmployeeUsernames, loginAttempt, recordLoginFailure, issueSession } from '../convex/core.js';
 import { localDateTime, payrollDayTotals, shiftInstant } from '../rules.js';
+import { punchView } from '../convex/lib.js';
 
 function fixture() {
   const tables = Object.fromEntries(['users', 'sessions', 'settings', 'punches', 'extensions', 'overtime', 'audit', 'loginAttempts']
@@ -499,13 +500,13 @@ test('admin can create, correct, clear details, and reject attendance without a 
   assert.equal((await f.ctx.db.get(proof)).verification,'REJECTED');
 });
 
-test('employee clock-in enforces the 6 AM to 4 PM window, including both boundaries', async () => {
+test('employee clock-in enforces the 6 AM to 5 PM window, including both boundaries', async () => {
   const f = fixture(), date = '2026-10-15', userId = await f.addUser('Worker','employee');
   await f.authorize(userId);
   f.ctx.db.system = { async get() { return { contentType: 'image/jpeg', size: 2000 }; } };
   const RealDate = globalThis.Date;
   try {
-    for (const [time, allowed] of [['05:59',false],['06:00',true],['16:00',true],['16:01',false]]) {
+    for (const [time, allowed] of [['05:59',false],['06:00',true],['16:00',true],['16:01',true],['17:00',true],['17:01',false]]) {
       const instant = RealDate.parse(shiftInstant(date, time));
       globalThis.Date = class extends RealDate {
         constructor(...args) { super(...(args.length ? args : [instant])); }
@@ -514,9 +515,35 @@ test('employee clock-in enforces the 6 AM to 4 PM window, including both boundar
       const call = () => submitPunch._handler(f.ctx, { token: f.token, selfieId: 'photo',
         input: { slot: 'IN', latitude: 14.5, longitude: 121, accuracyM: 10 } });
       if (allowed) {
-        await call();
+        const result=await call();
+        assert.equal(result.punch.source,'EMPLOYEE');
+        assert.equal(result.punch.sourceLabel,'Employee · Offsite');
         f.tables.punches.clear();
-      } else await assert.rejects(call(), /between 6:00 AM and 4:00 PM/);
+      } else await assert.rejects(call(), /between 6:00 AM and 5:00 PM/);
     }
   } finally { globalThis.Date = RealDate; }
+});
+
+test('editing only Time Out changes only that source to Admin and preserves the employee Time In', async () => {
+  const f=fixture(), date='2026-10-15';
+  const adminId=await f.addUser('Admin','admin'), userId=await f.addUser('Worker','employee');
+  await f.authorize(adminId);
+  const inId=await f.ctx.db.insert('punches',{userId,workDate:date,slot:'IN',method:'ONSITE',timeUtc:shiftInstant(date,'07:00'),active:true,verification:'APPROVED',selfieId:'original-in',reviewedBy:adminId});
+  const outId=await f.ctx.db.insert('punches',{userId,workDate:date,slot:'OUT',method:'OFFSITE',timeUtc:shiftInstant(date,'17:00'),active:true,verification:'APPROVED',selfieId:'original-out',reviewedBy:adminId});
+  await saveAdminAttendanceDay._handler(f.ctx,{token:f.token,input:{employeeId:userId,workDate:date,expectedIds:[inId,outId],segments:[
+    {inId,outId,timeIn:'07:00',timeOut:'17:00',offsite:true,reason:'Details only',fieldAssignment:'Client site'}
+  ]}});
+  assert.equal(punchView(await f.ctx.db.get(inId),'Worker').sourceLabel,'Employee · Onsite');
+  assert.equal(punchView(await f.ctx.db.get(outId),'Worker').sourceLabel,'Employee · Offsite');
+  await saveAdminAttendanceDay._handler(f.ctx,{token:f.token,input:{employeeId:userId,workDate:date,expectedIds:[inId,outId],segments:[
+    {inId,outId,timeIn:'07:00',timeOut:'18:00',offsite:true}
+  ]}});
+  const current=[...f.tables.punches.values()].filter(p=>p.active);
+  const savedIn=current.find(p=>p.slot==='IN'), savedOut=current.find(p=>p.slot==='OUT');
+  assert.equal(savedIn._id,inId);
+  assert.equal(savedIn.selfieId,'original-in');
+  assert.equal(punchView(savedIn,'Worker').sourceLabel,'Employee · Onsite');
+  assert.equal(punchView(savedOut,'Worker').sourceLabel,'Admin');
+  assert.equal(savedOut.createdBy,adminId);
+  assert.equal((await f.ctx.db.get(outId)).active,false);
 });

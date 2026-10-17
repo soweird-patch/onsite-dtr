@@ -61,6 +61,8 @@ export function safeDate(value) {
 
 export const REGULAR_START = '08:00';
 export const REGULAR_END = '17:00';
+export const FLEXIBLE_START_MINUTES = 6 * 60;
+export const FLEXIBLE_END_MINUTES = 17 * 60;
 export const OVERTIME_END = '22:00';
 export const NIGHT_END = '06:00';
 export const MIN_OVERTIME_MINUTES = 1;
@@ -141,6 +143,17 @@ export function groupPunches(punches = []) {
     groups.get(number)[punch.slot === 'IN' ? 'inPunch' : 'outPunch'] = punch;
   }
   return [...groups.values()].sort((a, b) => a.number - b.number);
+}
+
+// The recorded method identifies who supplied the time. Reviewers and field
+// assignments do not change the origin of an employee's original punch.
+export function punchProvenance(punch) {
+  if (!punch) return { source: null, locationType: null, sourceLabel: '—' };
+  if (punch.method === 'ADMIN') return { source: 'ADMIN', locationType: punch.assignmentType || null, sourceLabel: 'Admin' };
+  if (punch.method === 'SYSTEM') return { source: 'SYSTEM', locationType: null, sourceLabel: 'System · Auto 6:00 AM' };
+  if (['ONSITE', 'OFFSITE'].includes(punch.method)) return { source: 'EMPLOYEE', locationType: punch.method,
+    sourceLabel: `Employee · ${punch.method === 'ONSITE' ? 'Onsite' : 'Offsite'}` };
+  return { source: null, locationType: null, sourceLabel: 'Unknown' };
 }
 
 export function isPayrollDayReady(punches) {

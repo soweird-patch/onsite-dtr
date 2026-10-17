@@ -1,7 +1,7 @@
 import { query, mutation, internalQuery, internalMutation } from './_generated/server.js';
 import { internal } from './_generated/api.js';
 import { v } from 'convex/values';
-import { cutoffFor, groupPunches, holidayFor, localDateTime, premiumCalculationKey, shiftInstant, workBreakdownIntervals } from '../rules.js';
+import { cutoffFor, FLEXIBLE_START_MINUTES, FLEXIBLE_END_MINUTES, groupPunches, holidayFor, localDateTime, premiumCalculationKey, shiftInstant, workBreakdownIntervals } from '../rules.js';
 import { audit, authUser, dateRange, dayNow, digest, distanceMeters, localTimeToUtc,
   now, punchView, safeDate, settings, settingsDefault, settingsView, timezone,
   userView, validateEmployee, validEmail, normalizeUsername, validUsername } from './lib.js';
@@ -300,8 +300,8 @@ export const submitPunch = internalMutation({ args: { ...tokenArg, input: v.any(
   if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180 || !Number.isFinite(accuracy) || accuracy < 0) throw new Error('Current device location is required.');
   const config = await settings(ctx);
   const local = localDateTime(now(), timezone);
-  if (input.slot === 'IN' && (local.minutes < 360 || local.minutes > 960))
-    throw new Error('Time In is available between 6:00 AM and 4:00 PM. Ask admin to record exceptional work.');
+  if (input.slot === 'IN' && (local.minutes < FLEXIBLE_START_MINUTES || local.minutes > FLEXIBLE_END_MINUTES))
+    throw new Error('Time In is available between 6:00 AM and 5:00 PM. Ask admin to record exceptional work.');
   const priorDate = new Date(Date.parse(`${local.date}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
   const priorIn = local.minutes < 360 ? await punchFor(ctx, user._id, priorDate, 'IN') : null;
   const priorOpen = priorIn && !await punchFor(ctx, user._id, priorDate, 'OUT');

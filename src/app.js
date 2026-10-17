@@ -2,7 +2,7 @@ import { ConvexClient, ConvexHttpClient } from 'convex/browser';
 import { api as functions } from '../convex/_generated/api.js';
 import { attendanceDetails } from './reportDetails.js';
 import { groupPunches, holidayFor, isPayrollDayReady, isPayrollReady, isScheduledWorkday,
-  expectedTimeOut, localDateTime, payrollDayTotals, safeDate, shiftInstant, workBreakdown, workBreakdownIntervals, workIntervalBreakdowns } from '../rules.js';
+  expectedTimeOut, localDateTime, payrollDayTotals, premiumCalculationKey, punchProvenance, safeDate, shiftInstant, workBreakdown, workBreakdownIntervals, workIntervalBreakdowns } from '../rules.js';
 
 const root = document.getElementById('app');
 const deploymentUrl = import.meta.env.VITE_CONVEX_URL;
@@ -200,10 +200,7 @@ function formatShiftTime(iso, workDate) {
     ? `${formatTime(iso)} (+1 day)` : formatTime(iso);
 }
 function punchSource(punch) {
-  if (!punch) return '—';
-  if (punch.method === 'ADMIN') return `Admin ${punch.assignmentType?.toLowerCase() || 'created'}`;
-  if (punch.method === 'SYSTEM') return 'Auto 6:00 AM';
-  return punch.method === 'ONSITE' ? 'Onsite' : 'Offsite';
+  return punchProvenance(punch).sourceLabel;
 }
 function formatMinutes(minutes) {
   if (!minutes) return '0h 00m';
@@ -357,11 +354,11 @@ function runningBreakdown(date, inPunch, outPunch, extension) {
 }
 function badge(punch) {
   if (!punch) return '<span class="pill pending">Not recorded</span>';
-  if (punch.method === 'ADMIN') return '<span class="pill admin">Created by admin</span>';
-  if (punch.method === 'SYSTEM') return '<span class="pill admin">Auto-closed at 6:00 AM</span>';
-  if (punch.verification === 'PENDING') return '<span class="pill pending">Pending verification</span>';
-  if (punch.verification === 'REJECTED') return '<span class="pill rejected">Rejected</span>';
-  return `<span class="pill">${punch.method === 'ONSITE' ? 'Onsite' : 'Offsite'} verified</span>`;
+  if (punch.method === 'ADMIN') return '<span class="pill admin">Admin · Manual time</span>';
+  if (punch.method === 'SYSTEM') return '<span class="pill admin">System · Auto-closed at 6:00 AM</span>';
+  if (punch.verification === 'PENDING') return `<span class="pill pending">${h(punchSource(punch))} · Pending verification</span>`;
+  if (punch.verification === 'REJECTED') return `<span class="pill rejected">${h(punchSource(punch))} · Rejected</span>`;
+  return `<span class="pill">${h(punchSource(punch))} · Verified</span>`;
 }
 function minutesStatus(inPunch, outPunch, employee, date) {
   if (!isScheduledWorkday(date, employee.workdays, config().holidays)) return { late: 0, early: 0 };
@@ -422,7 +419,7 @@ function minutesStatusDay(punches, employee, date) {
 }
 function locationText(p) {
   if (!p) return '—';
-  if (p.method === 'ADMIN') return 'Created by admin';
+  if (p.method === 'ADMIN') return 'Manual time set by admin';
   if (p.method === 'SYSTEM') return 'Automatic 6:00 AM cutoff';
   return `${p.method === 'ONSITE' ? 'Site GPS' : 'Field GPS'} · ±${Math.round(p.accuracyM || 0)} m`;
 }
@@ -580,7 +577,7 @@ function renderEmployeeHome() {
     inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc
   })));
   return `<div class="hero"><p class="eyebrow">${h(prettyDate(today()))}</p><h1>${greeting()}, ${h(user.name.split(' ')[0])}</h1><p>Here's your attendance at a glance.</p></div>
-    <div class="grid"><section class="card wide employee-attendance-card"><div class="employee-attendance-head"><div class="card-title"><span class="symbol">◷</span> ${state.employeeData.openShift ? 'OVERNIGHT SHIFT' : "TODAY'S ATTENDANCE"}</div><button class="attendance-view-button" data-nav="history" aria-label="View attendance history" title="View attendance history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.8"></circle></svg></button></div><div class="pill ${statusOf(inPunch,outPunch) === 'Present' ? '' : 'pending'}">${h(holiday && !inPunch && !outPunch ? `Holiday · ${holiday.name}` : statusOf(inPunch,outPunch))}</div><p class="card-sub">Work date: ${h(prettyDate(workDate))}</p>${expectedOut ? `<p class="card-sub">Expected Time Out for 8 working hours: <strong>${h(formatShiftTime(expectedOut, workDate))}</strong>${outPunch ? '' : ' · assumes no further unpaid breaks'}</p>` : inPunch ? '<p class="card-sub">The remaining regular hours cannot be completed before 10:00 PM. Night differential is recorded separately.</p>' : '<p class="card-sub">Time In is available from 6:00 AM to 4:00 PM.</p>'}<div class="punch-line"><span>Time In</span><strong class="${inPunch ? '' : 'missing'}">${h(formatTime(inPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(inPunch)} ${h(locationText(inPunch))} ${inPunch ? mapLink(inPunch, 'Open Time In map ↗') : ''}</div><div class="punch-line"><span>Time Out</span><strong class="${outPunch ? '' : 'missing'}">${h(formatTime(outPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(outPunch)} ${h(locationText(outPunch))} ${outPunch ? mapLink(outPunch, 'Open Time Out map ↗') : ''}</div>${extension && outPunch ? `<p class="card-sub">Calculated overtime: ${h(formatMinutes(extra.overtimeCandidateMinutes))} (${h(extension.overtimeDecision.toLowerCase())}) · Night differential ${h(formatMinutes(extra.nightCandidateMinutes))} (${h(extra.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}).</p>` : ''}${action ? `<div class="card-actions"><button class="btn auto-punch-button" data-action="capture-auto" data-slot="${action}"><span aria-hidden="true">◎</span> ${action === 'IN' ? 'Time In' : 'Time Out'}</button></div>` : ''}${action ? `<div class="punch-location-status ready"><span>GPS automatically marks this punch as <strong>Onsite</strong> inside the site pin or <strong>Offsite</strong> outside it.</span></div>` : ''}</section>
+    <div class="grid"><section class="card wide employee-attendance-card"><div class="employee-attendance-head"><div class="card-title"><span class="symbol">◷</span> ${state.employeeData.openShift ? 'OVERNIGHT SHIFT' : "TODAY'S ATTENDANCE"}</div><button class="attendance-view-button" data-nav="history" aria-label="View attendance history" title="View attendance history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.8"></circle></svg></button></div><div class="pill ${statusOf(inPunch,outPunch) === 'Present' ? '' : 'pending'}">${h(holiday && !inPunch && !outPunch ? `Holiday · ${holiday.name}` : statusOf(inPunch,outPunch))}</div><p class="card-sub">Work date: ${h(prettyDate(workDate))}</p>${expectedOut ? `<p class="card-sub">Expected Time Out for 8 working hours: <strong>${h(formatShiftTime(expectedOut, workDate))}</strong>${outPunch ? '' : ' · assumes no further unpaid breaks'}</p>` : inPunch ? '<p class="card-sub">The remaining regular hours cannot be completed before 10:00 PM. Night differential is recorded separately.</p>' : '<p class="card-sub">Time In is available from 6:00 AM to 5:00 PM.</p>'}<div class="punch-line"><span>Time In</span><strong class="${inPunch ? '' : 'missing'}">${h(formatTime(inPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(inPunch)} ${h(locationText(inPunch))} ${inPunch ? mapLink(inPunch, 'Open Time In map ↗') : ''}</div><div class="punch-line"><span>Time Out</span><strong class="${outPunch ? '' : 'missing'}">${h(formatTime(outPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(outPunch)} ${h(locationText(outPunch))} ${outPunch ? mapLink(outPunch, 'Open Time Out map ↗') : ''}</div>${extension && outPunch ? `<p class="card-sub">Calculated overtime: ${h(formatMinutes(extra.overtimeCandidateMinutes))} (${h(extension.overtimeDecision.toLowerCase())}) · Night differential ${h(formatMinutes(extra.nightCandidateMinutes))} (${h(extra.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}).</p>` : ''}${action ? `<div class="card-actions"><button class="btn auto-punch-button" data-action="capture-auto" data-slot="${action}"><span aria-hidden="true">◎</span> ${action === 'IN' ? 'Time In' : 'Time Out'}</button></div>` : ''}${action ? `<div class="punch-location-status ready"><span>GPS automatically marks this punch as <strong>Onsite</strong> inside the site pin or <strong>Offsite</strong> outside it.</span></div>` : ''}</section>
     <section class="card"><div class="card-title"><span class="symbol">▤</span> CURRENT CUTOFF</div><div class="card-sub">${h(dateSpan(current))}</div><div class="metric-row"><div class="metric-cell"><div class="metric green">${days.size}</div><span class="label">Days with Time In</span></div><div class="metric-cell"><div class="metric amber">${late}</div><span class="label">Late minutes</span></div></div><p class="card-sub">Undertime: ${h(formatMinutes(undertime))}</p><button class="link-button" data-nav="history">View cutoff details ›</button></section>
     ${recentAttendanceFolders(punches)}${renderHolidayCard()}</div>
     ${inPunch && !outPunch && extra.overtimeCandidateMinutes ? `<div style="height:16px"></div><div class="notice">Current estimated overtime beyond 8 actual working hours: <strong>${h(formatMinutes(extra.overtimeCandidateMinutes))}</strong>. The final OT request is created automatically when Time Out is recorded.</div>` : ''}`;
@@ -776,7 +773,7 @@ function renderEmployees() {
       <div class="field"><label>${e ? 'New password (leave blank to keep)' : 'Temporary password (8+ characters)'}</label><input name="password" type="password" minlength="8" ${e ? '' : 'required'} autocomplete="new-password"></div>
       <div class="field"><label>Working Hours</label><select id="working-hours-type" name="scheduleType"><option value="STANDARD" ${custom ? '' : 'selected'}>Standard · 8:00 AM–5:00 PM</option><option value="CUSTOM" ${custom ? 'selected' : ''}>Custom schedule</option></select></div>
       <div id="custom-working-hours" class="field-row ${custom ? '' : 'hidden'}"><div class="field"><label>Scheduled start</label><input name="scheduleStart" type="time" value="${h(e?.scheduleStart || '08:00')}"></div><div class="field"><label>Scheduled end</label><input name="scheduleEnd" type="time" value="${h(e?.scheduleEnd || '17:00')}"></div></div>
-      <div class="notice">The admin sets the planned schedule. Employees can clock in from 6:00 AM to 4:00 PM and finish after 8 actual working hours before 10:00 PM, excluding 12:00–1:00 PM lunch. Night-window time is recorded separately. Example: 7:00 AM in → 4:00 PM expected out; 5:00 PM out creates 1 hour of pending OT for admin approval. Schedule edits immediately update existing attendance from the effective date, including today. Original punch times are preserved and affected premium reviews return to pending.</div>
+      <div class="notice">The admin sets the planned schedule. Employees can clock in from 6:00 AM to 5:00 PM and finish after 8 actual working hours before 10:00 PM, excluding 12:00–1:00 PM lunch. Night-window time is recorded separately. Example: 7:00 AM in → 4:00 PM expected out; 5:00 PM out creates 1 hour of pending OT for admin approval. Schedule edits immediately update existing attendance from the effective date, including today. Original punch times are preserved and affected premium reviews return to pending.</div>
       ${e ? `<div class="field"><label>Apply schedule from</label><input name="scheduleEffectiveDate" type="date" max="${today()}" value="${today()}" required><p class="tiny-label">Updates this date and all later recorded attendance.</p></div>` : ''}
       <div class="field"><label>Workdays</label><div class="day-picker">${[['Sun',0],['Mon',1],['Tue',2],['Wed',3],['Thu',4],['Fri',5],['Sat',6]].map(([name,n]) => `<label><input type="checkbox" name="day" value="${n}" ${days.includes(n) ? 'checked' : ''}> ${name}</label>`).join('')}</div></div>
       ${e ? `<label class="check-row"><input name="active" type="checkbox" ${e.active ? 'checked' : ''}> Active account</label>` : ''}
@@ -805,7 +802,7 @@ function renderBackfill() {
     <div data-interval-hours="${index}" aria-live="polite">${intervalHoursMarkup(intervalHours[index])}</div>
     ${saved ? `<div class="manual-saved-proof">${[saved.inPunch, saved.outPunch].filter(Boolean).map(punch => `<span>${punch.slot === 'IN' ? 'In' : 'Out'}: ${h(punchSource(punch))} · ${h(punch.verification.toLowerCase())}${punch.hasSelfie ? ' · selfie' : ''}${mapLink(punch, 'Map ↗')}</span>`).join('')}</div><p class="tiny-label">Unchanged times keep the original selfie, GPS, and approval. Edited times become audited admin corrections.</p>` : ''}</section>`;
   }).join('');
-  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Add attendance</h1><p>Select an employee and work date to load existing punches, edit the times, or add a return-to-work interval.</p></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">＋</span> ADMIN ATTENDANCE EDITOR</div><form id="backfill-form"><div class="field"><label>Employee</label><select name="employeeId" required><option value="">Select employee</option>${state.employees.map(e => `<option value="${e.id}" ${e.id === draft.employeeId ? 'selected' : ''}>${h(e.name)}</option>`).join('')}</select></div><div class="field"><label>Work date</label><input name="workDate" type="date" value="${h(draft.workDate)}" required></div>${state.backfillLoading ? '<div class="notice">Loading saved punches…</div>' : draft.employeeId ? `<div class="notice ${draft.expectedIds.length ? 'success' : ''}">${draft.expectedIds.length ? `${draft.expectedIds.length} existing punch${draft.expectedIds.length === 1 ? '' : 'es'} loaded for this day. Edit only the time that needs correction.` : 'No punches saved for this day yet.'}</div>` : '<p class="tiny-label">Choose an employee to check this day’s current attendance.</p>'}<div class="manual-interval-list">${segments}</div><button class="btn secondary small" type="button" data-action="add-manual-interval" ${state.backfillLoading ? 'disabled' : ''}>＋ Add another Time In / Time Out</button><p class="tiny-label">New or edited punches are marked Created by admin. Existing punches with unchanged times keep their proof. Extra hours still require admin review.</p><button class="btn block" type="submit" ${state.backfillLoading ? 'disabled' : ''}>Review attendance changes</button></form></div><div class="card"><div class="card-title"><span class="symbol">ⓘ</span> HOW HOURS ARE COUNTED</div><p class="card-sub">Employees may clock in from 6:00 AM to 4:00 PM. The first 8 actual working hours before 10:00 PM are regular time. Later daytime intervals fill any regular shortage first, then earn OT. Night intervals count only toward night differential. The 12:00–1:00 PM lunch and gaps between intervals are unpaid. Working fewer than 8 hours creates undertime.</p><p class="card-sub">Work beyond 8 actual working hours is pending OT until 10:00 PM, including before 5:00 PM. Night differential is fixed at 10:00 PM–6:00 AM and needs separate admin approval. Night-window work never fills regular shortage or adds OT. Gaps between work intervals never earn hours.</p><button class="link-button" data-nav="records">Review extra hours ›</button></div></div>`;
+  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Add attendance</h1><p>Select an employee and work date to load existing punches, edit the times, or add a return-to-work interval.</p></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">＋</span> ADMIN ATTENDANCE EDITOR</div><form id="backfill-form"><div class="field"><label>Employee</label><select name="employeeId" required><option value="">Select employee</option>${state.employees.map(e => `<option value="${e.id}" ${e.id === draft.employeeId ? 'selected' : ''}>${h(e.name)}</option>`).join('')}</select></div><div class="field"><label>Work date</label><input name="workDate" type="date" value="${h(draft.workDate)}" required></div>${state.backfillLoading ? '<div class="notice">Loading saved punches…</div>' : draft.employeeId ? `<div class="notice ${draft.expectedIds.length ? 'success' : ''}">${draft.expectedIds.length ? `${draft.expectedIds.length} existing punch${draft.expectedIds.length === 1 ? '' : 'es'} loaded for this day. Edit only the time that needs correction.` : 'No punches saved for this day yet.'}</div>` : '<p class="tiny-label">Choose an employee to check this day’s current attendance.</p>'}<div class="manual-interval-list">${segments}</div><button class="btn secondary small" type="button" data-action="add-manual-interval" ${state.backfillLoading ? 'disabled' : ''}>＋ Add another Time In / Time Out</button><p class="tiny-label">New or edited punches are marked Created by admin. Existing punches with unchanged times keep their proof. Extra hours still require admin review.</p><button class="btn block" type="submit" ${state.backfillLoading ? 'disabled' : ''}>Review attendance changes</button></form></div><div class="card"><div class="card-title"><span class="symbol">ⓘ</span> HOW HOURS ARE COUNTED</div><p class="card-sub">Employees may clock in from 6:00 AM to 5:00 PM. The first 8 actual working hours before 10:00 PM are regular time. Later daytime intervals fill any regular shortage first, then earn OT. Night intervals count only toward night differential. The 12:00–1:00 PM lunch and gaps between intervals are unpaid. Working fewer than 8 hours creates undertime.</p><p class="card-sub">Work beyond 8 actual working hours is pending OT until 10:00 PM, including before 5:00 PM. Night differential is fixed at 10:00 PM–6:00 AM and needs separate admin approval. Night-window work never fills regular shortage or adds OT. Gaps between work intervals never earn hours.</p><button class="link-button" data-nav="records">Review extra hours ›</button></div></div>`;
 }
 function reportRows() {
   const range = state.reportRange || currentRange();
@@ -815,7 +812,7 @@ function reportRows() {
   return state.employees.map(employee => {
     const rows = [];
     const totals = { noRecord: 0, holidays: 0, undertime: 0,
-      regular: 0, overtime: 0, night: 0, pending: 0 };
+      regular: 0, overtime: 0, night: 0, pendingOvertime: 0, pendingNight: 0, pending: 0 };
     for (let date = range.start; date <= range.end; date = tomorrow(date)) {
       const pair = punches.filter(p => p.userId === employee.id && p.workDate === date);
       const segments = groupPunches(pair);
@@ -834,6 +831,11 @@ function reportRows() {
       const payrollReady = isPayrollDayReady(pair);
       const approved = payrollDayTotals(date, pair, extension);
       const overtime = approved.overtime, night = approved.night;
+      const currentCalculation = extension?.calculationKey === premiumCalculationKey(date, pair);
+      const pendingOvertime = !currentCalculation || extension?.overtimeDecision === 'PENDING'
+        ? hours.overtimeCandidateMinutes : 0;
+      const pendingNight = !currentCalculation || extension?.nightDecision === 'PENDING'
+        ? hours.nightCandidateMinutes : 0;
       const overtimeStatus = !extension ? 'No request' : !complete
         ? 'In progress' : hours.remainingOvertimeMinutes ? extension.overtimeDecision : 'No remaining OT';
       const adjustmentStatus = hours.proposedTransferMinutes ? (extension?.adjustmentDecision || 'PENDING') : '—';
@@ -841,13 +843,14 @@ function reportRows() {
       if (status === 'No record' && scheduled) totals.noRecord++;
       if (holiday) totals.holidays++;
       if (status.startsWith('Pending verification') || status.startsWith('Needs correction') ||
-          adjustmentStatus === 'PENDING' || overtimeStatus === 'PENDING' || nightStatus === 'PENDING') totals.pending++;
+          adjustmentStatus === 'PENDING' || overtimeStatus === 'PENDING' || nightStatus === 'PENDING' || pendingOvertime || pendingNight) totals.pending++;
       const undertime = approved.undertime;
       const regular = approved.regular;
       totals.undertime += scheduled && payrollReady ? undertime : 0;
       totals.regular += payrollReady ? regular : 0; totals.overtime += overtime; totals.night += night;
+      totals.pendingOvertime += pendingOvertime; totals.pendingNight += pendingNight;
       rows.push({ date, inPunch, outPunch, punches: pair, undertime: scheduled && payrollReady ? undertime : 0,
-        regular: payrollReady ? regular : 0, overtime, night });
+        regular: payrollReady ? regular : 0, overtime, night, pendingOvertime, pendingNight });
     }
     return { employee, rows, totals };
   });
@@ -868,9 +871,9 @@ function renderReportEmployee({ employee, rows, totals }, range, generated, visi
     <td data-label="Time Out">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatShiftTime(group.outPunch?.timeUtc, row.date))}</div>`).join('') || '—'}</td>
     <td data-label="Source">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(punchSource(group.inPunch))} / ${h(punchSource(group.outPunch))}</div>`).join('') || '—'}</td>
     <td data-label="Regular">${h(formatMinutes(row.regular))}</td><td data-label="Undertime">${h(formatMinutes(row.undertime))}</td>
-    <td data-label="OT">${h(formatMinutes(row.overtime))}</td><td data-label="Night differential">${h(formatMinutes(row.night))}</td></tr>`).join('');
+    <td data-label="OT">${h(formatMinutes(row.overtime))}${row.pendingOvertime ? `<small class="report-pending">Pending OT: ${h(formatMinutes(row.pendingOvertime))}</small>` : ''}</td><td data-label="Night differential">${h(formatMinutes(row.night))}${row.pendingNight ? `<small class="report-pending">Pending ND: ${h(formatMinutes(row.pendingNight))}</small>` : ''}</td></tr>`).join('');
   return `<section class="report-employee ${visible ? '' : 'report-unselected'}">${renderReportHeader(range, generated, 'employee-report-header')}<div class="report-employee-head"><div><span>EMPLOYEE</span><h3>${h(employee.name)}</h3></div><div class="report-total"><span>Approved regular</span><strong>${h(formatMinutes(totals.regular))}</strong></div></div>
-    <div class="report-summary-grid"><div><span>OT</span><strong>${h(formatMinutes(totals.overtime))}</strong></div><div><span>Night differential</span><strong>${h(formatMinutes(totals.night))}</strong></div><div><span>Undertime</span><strong>${h(formatMinutes(totals.undertime))}</strong></div><div><span>Exceptions</span><strong>${totals.pending}</strong></div><div><span>No record</span><strong>${totals.noRecord}</strong></div><div><span>Holidays</span><strong>${totals.holidays}</strong></div></div>
+    <div class="report-summary-grid"><div><span>Approved OT</span><strong>${h(formatMinutes(totals.overtime))}</strong>${totals.pendingOvertime ? `<small class="report-pending">Pending OT: ${h(formatMinutes(totals.pendingOvertime))}</small>` : ''}</div><div><span>Approved night differential</span><strong>${h(formatMinutes(totals.night))}</strong>${totals.pendingNight ? `<small class="report-pending">Pending ND: ${h(formatMinutes(totals.pendingNight))}</small>` : ''}</div><div><span>Undertime</span><strong>${h(formatMinutes(totals.undertime))}</strong></div><div><span>Exceptions</span><strong>${totals.pending}</strong></div><div><span>No record</span><strong>${totals.noRecord}</strong></div><div><span>Holidays</span><strong>${totals.holidays}</strong></div></div>
     <div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Source</th><th>Regular</th><th>Undertime</th><th>OT</th><th>Night differential</th></tr></thead><tbody>${body}</tbody></table></div>${detailTable}</section>`;
 }
 function renderReport() {

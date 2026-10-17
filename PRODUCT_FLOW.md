@@ -9,7 +9,7 @@ Ang reference UI ay ang ipinadalang dark navy/teal mobile dashboard: greeting sa
 ## 2. Mga kailangang i-set ng admin bago gamitin
 
 1. **Payroll cutoff:** start/end day ng dalawang period bawat buwan (sample mula sa screenshot: 11–25 at 26–10). Inclusive ang dates; dapat tama rin ang period na tumatawid ng buwan o taon.
-2. **Work schedule:** Standard 8:00 AM–5:00 PM o Custom start/end per employee; excluded ang 12:00–1:00 PM unpaid break, kasama ang configured workdays at Asia/Manila timezone. Time In ay puwede mula 6:00 AM hanggang 4:00 PM. Ang unang 8 actual working hours sa 6:00 AM–10:00 PM window ay regular; later daytime intervals fill the regular shortage first, then the remainder is pending OT until 10:00 PM. Ang 10:00 PM–6:00 AM interval ay night differential lang at hindi pupuno ng regular shortage. Schedule changes apply immediately from the chosen effective date and reset affected premium reviews. Tingnan ang [regular at premium workflow](PREMIUM_FLOW.md).
+2. **Work schedule:** Standard 8:00 AM–5:00 PM o Custom start/end per employee; excluded ang 12:00–1:00 PM unpaid break, kasama ang configured workdays at Asia/Manila timezone. Time In ay puwede mula 6:00 AM hanggang 5:00 PM. Ang unang 8 actual working hours sa 6:00 AM–10:00 PM window ay regular; later daytime intervals fill the regular shortage first, then the remainder is pending OT until 10:00 PM. Ang 10:00 PM–6:00 AM interval ay night differential lang at hindi pupuno ng regular shortage. Schedule changes apply immediately from the chosen effective date and reset affected premium reviews. Tingnan ang [regular at premium workflow](PREMIUM_FLOW.md).
 3. **Nag-iisang onsite location:** admin ang magse-set at mag-a-update ng site name/address, GPS pin (latitude/longitude), at allowed radius/geofence. Itatala ang history ng pin/radius changes para hindi maiba ang interpretasyon ng lumang punches.
 4. **Employee accounts:** full name, unique username para sa login, employee ID, status, role, at assigned schedule. Admin login uses email. Admin ang gagawa at magdi-disable ng account.
 5. **Verification policy:** sino ang puwedeng mag-approve ng offsite entries at ilang araw bago ma-lock ang cutoff.
@@ -69,7 +69,7 @@ Create/edit/disable employee; assign employee ID, schedule, at initial login ins
 
 ### D. Admin-created attendance / no-internet backfill
 
-1. Piliin ang employee at work date, ilagay ang AM In at/o PM Out, at **optional reason** (hal. no signal sa field). Ang source ay laging **Created by admin** para hindi magmukhang GPS-verified employee punch.
+1. Piliin ang employee at work date, ilagay ang AM In at/o PM Out, at **optional reason** (hal. no signal sa field). Ang manual time source ay **Admin** para hindi magmukhang GPS-verified employee punch.
 2. Para sa offsite backfill, ilagay ang aktuwal na In/Out at piliin kung next day ang Out. Awtomatikong iko-compute ang eligible overtime at Differential; hiwalay na aaprubahan ng admin. Hindi kailangan ng selfie/location para sa admin-created event.
 3. Malinaw na label: **Created by admin** sa employee view, admin list, at print/export. Itala ang creator, oras ng pag-create, reason, at history ng anumang edit.
 4. Kung may original employee punch sa parehong slot, huwag i-overwrite. Gumawa ng documented correction/replacement na may original record retained.
@@ -88,7 +88,7 @@ Create/edit/disable employee; assign employee ID, schedule, at initial login ins
 | Wala pang AM In | Ipakita ang Time In action. |
 | May AM In, wala pang PM Out | Ipakita ang Time Out action; status **Incomplete** hanggang makumpleto. |
 | May parehong punches | Status **Present** kung valid; late/undertime ay hiwalay na minutes. |
-| Time In mula 6:00 AM hanggang 4:00 PM | Flexible arrival; expected Time Out follows 8 actual working hours, excluding unpaid lunch and gaps. |
+| Time In mula 6:00 AM hanggang 5:00 PM | Flexible arrival; expected Time Out follows 8 actual working hours, excluding unpaid lunch and gaps. |
 | Time Out bago makumpleto ang 8 actual working hours | **Undertime** = 480 minus actual working minutes. Time beyond 8 working hours is pending OT until 10:00 PM, including before 5:00 PM. Night differential stays fixed at 10:00 PM–6:00 AM. |
 | Walang punch matapos ang scheduled shift | **No record / possible absence**, para i-review ng admin. Hindi agad payroll-final kung may leave/holiday/exemption. |
 | Offsite proof | **Pending verification** hanggang approve/reject ng admin. |
@@ -103,7 +103,7 @@ Ang oras sa regular, overtime, at Differential windows ay nasa [premium workflow
 - **Site settings:** iisang active site, coordinates, radius, effective dates/version, at admin change history.
 - **Schedule:** Asia/Manila timezone, Standard 8:00 AM–5:00 PM o Custom start/end, at workdays; walang grace period.
 - **Cutoff:** start/end dates, state (open/finalized), report version.
-- **Attendance event:** employee, work date, slot (AM In/PM Out), official timestamp, source (`onsite`/`offsite`/`admin`), device capture time, site settings version/geofence result, coordinates and accuracy, selfie reference, verification state, interval-specific reason and field assignment, creator/reviewer, timestamps.
+- **Attendance event:** employee, work date, slot (AM In/PM Out), official timestamp, source (Employee o Admin), hiwalay na onsite/offsite classification, device capture time, site settings version/geofence result, coordinates and accuracy, selfie reference, verification state, interval-specific reason and field assignment, creator/reviewer, timestamps.
 - **Audit log:** login/session activity as appropriate, punch submission, approval/rejection, admin backfill, correction, cutoff finalization, and export/print.
 
 Selfie at precise location ay sensitive data: role-based access, encrypted storage/transfer, limited retention, at access logging. Sa login at capture screens, ipaliwanag kung bakit kinukuha ang location at image.

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { cutoffFor, distanceMeters, attendanceMinutes, isPayrollDayReady, isPayrollReady,
-  expectedTimeOut, payrollDayTotals, premiumCalculationKey, workBreakdown, workBreakdownIntervals, workIntervalBreakdowns, shiftInstant } from '../rules.js';
+  expectedTimeOut, payrollDayTotals, premiumCalculationKey, punchProvenance, workBreakdown, workBreakdownIntervals, workIntervalBreakdowns, shiftInstant } from '../rules.js';
 
 function assertBreakdown(actual, expected) {
   for (const [key, value] of Object.entries(expected)) assert.equal(actual[key], value, key);
@@ -22,6 +22,26 @@ test('cutoff crosses month and year boundaries', () => {
 test('site distance is zero at pin and exceeds radius far away', () => {
   assert.equal(distanceMeters(14.6, 121, 14.6, 121), 0);
   assert.ok(distanceMeters(14.6, 121, 14.61, 121) > 1000);
+});
+
+test('source identifies the person who supplied the punch time, independently of location and reviewer', () => {
+  assert.equal(punchProvenance({method:'ONSITE',reviewedBy:'admin'}).sourceLabel,'Employee · Onsite');
+  assert.equal(punchProvenance({method:'OFFSITE',reviewedBy:'admin',assignmentType:'OFFSITE'}).sourceLabel,'Employee · Offsite');
+  assert.deepEqual(punchProvenance({method:'ADMIN',assignmentType:'OFFSITE'}),{
+    source:'ADMIN',locationType:'OFFSITE',sourceLabel:'Admin'
+  });
+  assert.equal(punchProvenance({method:'ADMIN',assignmentType:'ONSITE'}).sourceLabel,'Admin');
+});
+
+test('planned 8–5 schedule permits early completion and actual hours determine undertime or pending OT', () => {
+  const date='2026-10-15';
+  for(const [start,end,regular,under,ot] of [
+    ['06:00','15:00',480,0,0],['07:00','16:00',480,0,0],['07:00','17:00',480,0,60],
+    ['08:10','19:04',480,0,114],['10:00','18:00',420,60,0],['10:00','19:00',480,0,0],
+    ['17:00','22:00',300,180,0]
+  ]) assertBreakdown(workBreakdown(date,shiftInstant(date,start),shiftInstant(date,end),null,'08:00','17:00'),{
+    regularMinutes:regular,undertimeMinutes:under,overtimeCandidateMinutes:ot
+  });
 });
 
 test('flexible arrival only creates undertime for an actual shortfall', () => {
