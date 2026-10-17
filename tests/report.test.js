@@ -36,6 +36,8 @@ test('report renders every interval detail, escapes text, and includes open and 
   const app = appHarness();
   const html = app.renderReportEmployee(fixture, { start: '2026-10-01', end: '2026-10-01' }, 'QA', true);
   assert.ok(html.includes('data-label="Date">10/01/2026 Thu.</td>'));
+  assert.ok(html.includes('data-label="Source">Admin</td>'));
+  assert.ok(!html.includes('Admin / Admin'));
   assert.ok(html.indexOf('Reasons and Field Assignments') > html.indexOf('Night differential</th>'));
   assert.ok(html.includes('<th>Date</th><th>Time In</th><th>Time Out</th><th>Reason</th><th>Field Assignment</th>'));
   assert.ok(html.includes('&lt;script&gt;unsafe&lt;/script&gt;'));
@@ -160,7 +162,8 @@ test('PDF OT includes approved ND with ten minutes undertime and excludes pendin
   const html=app.renderReportEmployee(report,{start:date,end:date},'QA',true);
   assert.ok(html.includes('Approved Overtime</span><strong>2h 00m'));
   assert.ok(html.includes('Undertime</span><strong>0h 10m'));
-  assert.ok(html.includes('The ND column is included in OT total. ND never reduces undertime.'));
+  assert.ok(!html.includes('OT total = approved'));
+  assert.ok(!html.includes('report-ot-note'));
   assert.ok(html.includes('<th>Overtime</th>'));
   extension.nightDecision='REJECTED';
   assert.equal(app.reportRows()[0].totals.overtime,0);

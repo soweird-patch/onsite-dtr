@@ -136,6 +136,5 @@ body{background:radial-gradient(circle at 12% -10%,#12334b 0,transparent 32%),va
   .report-sheet .report-details th:nth-child(4),.report-sheet .report-details th:nth-child(5){width:32%}
 }
 .report-pending{display:block;margin-top:4px;color:#875800;font-size:.68rem;line-height:1.4;font-weight:650;white-space:normal}
-.report-ot-note{margin:0 0 12px;color:#52656d;font-size:.72rem;line-height:1.5}
 .manual-day-summary{margin:15px 0;padding:14px;border:1px solid #3b8291;border-radius:15px;background:#123546}.manual-day-summary>p{margin-bottom:0}.manual-day-summary>p strong{color:var(--teal)}
 @media print{.report-pending{font-size:7px;color:#704900}}
