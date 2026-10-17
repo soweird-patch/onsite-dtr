@@ -7,8 +7,11 @@ test('employee editor uses username login and retains editable planned working h
   const app = appHarness();
   const employee = {id:'worker',name:'Juan Dela Cruz',username:'juan.delacruz',active:true,
     scheduleStart:'07:00',scheduleEnd:'16:00',workdays:[1,2,3,4,5,6]};
-  Object.assign(app.state,{selectedEmployee:employee,employees:[employee],session:{today:'2026-10-17'}});
-  const html = app.renderEmployees();
+  Object.assign(app.state,{employees:[employee],session:{today:'2026-10-17'}});
+  const list = app.renderEmployees();
+  assert.ok(list.includes('Juan Dela Cruz'));
+  assert.ok(!list.includes('id="employee-form"'));
+  const html = app.renderEmployeeForm(employee);
   assert.ok(html.includes('name="username"'));
   assert.ok(!html.includes('name="mobile"'));
   assert.ok(html.includes('name="scheduleStart" type="time" value="07:00"'));

@@ -30,7 +30,7 @@ const state = {
   branding: { appName: 'Onsite DTR', logo192Url: null, logo512Url: null },
   signupAvailable: false, authMode: 'login', signupPhoto: null,
   employees: [], adminData: { punches: [], extensions: [], overtime: [] }, historyRange: null,
-  adminRange: null, reportRange: null, reportEmployeeId: null, selectedEmployee: null, capture: null,
+  adminRange: null, reportRange: null, reportEmployeeId: null, capture: null,
   backfillDraft: null, backfillLoadId: 0, backfillLoading: false,
   cameraStream: null, sitePromptedDate: null, onsiteAccess: null, installPrompt: null, installDismissed: false, modal: null, auditItems: [],
   message: '', messageType: 'notice'
@@ -797,24 +797,27 @@ function renderRecords() {
   const range = state.adminRange || { start: today(), end: today() };
   return `<div class="section-head"><div><p class="eyebrow">ADMIN · ${h(dateSpan(range))}</p><h1 class="section-title">Attendance records</h1><p>Open one employee workday, review both punches, then approve it for payroll.</p></div><button class="icon-btn" type="button" data-action="records-filter" aria-label="Filter attendance by date range" title="Filter by date range"><span aria-hidden="true">☷</span></button></div>${renderPremiumQueue()}<div class="section-head settings-extra"><h2 class="section-title">Daily employee attendance</h2></div>${state.adminData.punches.length ? `<div class="list">${dailyRecordItems(state.adminData.punches)}</div>` : '<div class="empty">No attendance records for this date range.</div>'}`;
 }
-function renderEmployees() {
-  const e = state.selectedEmployee;
+function renderEmployeeForm(employee = null, draft = null) {
+  const editing = !!employee?.id;
+  const e = draft || employee;
   const days = e?.workdays || [1, 2, 3, 4, 5, 6];
-  const custom = !!e && (e.scheduleStart !== '08:00' || e.scheduleEnd !== '17:00');
-  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Employees</h1><p>Create accounts, assign workdays, and choose Standard or Custom working hours.</p></div><button class="btn small secondary" data-action="employee-new">New</button></div>
-    <div class="split"><div class="card"><div class="card-title"><span class="symbol">♙</span> ${e ? 'EDIT EMPLOYEE' : 'CREATE EMPLOYEE'}</div>
-    <form id="employee-form"><input type="hidden" name="id" value="${e?.id || ''}">
+  const custom = e?.scheduleType ? e.scheduleType === 'CUSTOM' : !!e && (e.scheduleStart !== '08:00' || e.scheduleEnd !== '17:00');
+  return `<form id="employee-form"><input type="hidden" name="id" value="${h(employee?.id || '')}">
       <div class="field"><label>Name</label><input name="name" value="${h(e?.name || '')}" required maxlength="120"></div>
       <div class="field"><label for="employee-username">Username / login</label><input id="employee-username" name="username" type="text" autocapitalize="none" spellcheck="false" autocomplete="off" pattern="[A-Za-z][A-Za-z0-9._\\-]{2,31}" minlength="3" maxlength="32" placeholder="e.g. juan.delacruz" value="${h(e?.username || '')}" required><p class="tiny-label">3–32 characters. Start with a letter; use letters, numbers, dots, underscores, or hyphens. Usernames are not case-sensitive.</p></div>
-      <div class="field"><label>${e ? 'New password (leave blank to keep)' : 'Temporary password (8+ characters)'}</label><input name="password" type="password" minlength="8" ${e ? '' : 'required'} autocomplete="new-password"></div>
+      <div class="field"><label>${editing ? 'New password (leave blank to keep)' : 'Temporary password (8+ characters)'}</label><input name="password" type="password" minlength="8" ${editing ? '' : 'required'} value="${h(draft?.password || '')}" autocomplete="new-password"></div>
       <div class="field"><label>Working Hours</label><select id="working-hours-type" name="scheduleType"><option value="STANDARD" ${custom ? '' : 'selected'}>Standard · 8:00 AM–5:00 PM</option><option value="CUSTOM" ${custom ? 'selected' : ''}>Custom schedule</option></select></div>
       <div id="custom-working-hours" class="field-row ${custom ? '' : 'hidden'}"><div class="field"><label>Scheduled start</label><input name="scheduleStart" type="time" value="${h(e?.scheduleStart || '08:00')}"></div><div class="field"><label>Scheduled end</label><input name="scheduleEnd" type="time" value="${h(e?.scheduleEnd || '17:00')}"></div></div>
       <div class="notice">The admin sets the planned schedule. Employees can clock in from 6:00 AM to 5:00 PM and finish after 8 actual working hours before 10:00 PM, excluding 12:00–1:00 PM lunch. Night-window time is recorded separately. Example: 7:00 AM in → 4:00 PM expected out; 5:00 PM out creates 1 hour of pending OT for admin approval. Schedule edits immediately update existing attendance from the effective date, including today. Original punch times are preserved and affected premium reviews return to pending.</div>
-      ${e ? `<div class="field"><label>Apply schedule from</label><input name="scheduleEffectiveDate" type="date" max="${today()}" value="${today()}" required><p class="tiny-label">Updates this date and all later recorded attendance.</p></div>` : ''}
+      ${editing ? `<div class="field"><label>Apply schedule from</label><input name="scheduleEffectiveDate" type="date" max="${today()}" value="${h(e?.scheduleEffectiveDate || today())}" required><p class="tiny-label">Updates this date and all later recorded attendance.</p></div>` : ''}
       <div class="field"><label>Workdays</label><div class="day-picker">${[['Sun',0],['Mon',1],['Tue',2],['Wed',3],['Thu',4],['Fri',5],['Sat',6]].map(([name,n]) => `<label><input type="checkbox" name="day" value="${n}" ${days.includes(n) ? 'checked' : ''}> ${name}</label>`).join('')}</div></div>
-      ${e ? `<label class="check-row"><input name="active" type="checkbox" ${e.active ? 'checked' : ''}> Active account</label>` : ''}
-      <button class="btn block" type="submit">${e ? 'Save employee' : 'Create account'}</button>
-    </form></div><div class="card"><div class="card-title"><span class="symbol">▤</span> EMPLOYEE LIST</div><div class="list">${state.employees.length ? state.employees.map(item => `<div class="list-item"><div><strong>${h(item.name)}</strong><p>${h(item.username || 'Username not set')} · ${h(formatClockText(item.scheduleStart))}–${h(formatClockText(item.scheduleEnd))} ${item.active ? '' : '· Disabled'}</p></div><div class="employee-actions"><button class="btn small secondary" data-action="employee-edit" data-id="${item.id}">Edit</button><button class="btn small danger" data-action="employee-delete" data-id="${item.id}">Delete</button></div></div>`).join('') : '<div class="empty">No employees yet.</div>'}</div></div></div>`;
+      ${editing ? `<label class="check-row"><input name="active" type="checkbox" ${e.active ? 'checked' : ''}> Active account</label>` : ''}
+      <div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Close</button><button class="btn" type="submit">${editing ? 'Save employee' : 'Create account'}</button></div>
+    </form>`;
+}
+function renderEmployees() {
+  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Employees</h1><p>View employees or choose New to create an account.</p></div><button class="btn small secondary" type="button" data-action="employee-new" aria-haspopup="dialog">New</button></div>
+    <div class="card"><div class="card-title"><span class="symbol">▤</span> EMPLOYEE LIST</div><div class="list">${state.employees.length ? state.employees.map(item => `<div class="list-item"><div><strong>${h(item.name)}</strong><p>${h(item.username || 'Username not set')} · ${h(formatClockText(item.scheduleStart))}–${h(formatClockText(item.scheduleEnd))} ${item.active ? '' : '· Disabled'}</p></div><div class="employee-actions"><button class="btn small secondary" data-action="employee-edit" data-id="${item.id}">Edit</button><button class="btn small danger" data-action="employee-delete" data-id="${item.id}">Delete</button></div></div>`).join('') : '<div class="empty">No employees yet.</div>'}</div></div>`;
 }
 function renderSettings() {
   const s = config();
@@ -1001,7 +1004,9 @@ async function checkSitePrompt() {
 function showModal(modal) {
   const holder = document.getElementById('modal-root'); if (!holder) return;
   state.modal = modal;
-  if (modal.kind === 'edit-profile') {
+  if (modal.kind === 'employee-editor') {
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="employee-editor-title"><div class="modal-head"><div><p class="modal-kicker">EMPLOYEES</p><h2 id="employee-editor-title">${modal.employee ? 'Edit employee' : 'Create employee'}</h2></div><button class="close" type="button" data-action="modal-close" aria-label="Close employee form">×</button></div>${renderEmployeeForm(modal.employee, modal.draft)}</div></div>`;
+  } else if (modal.kind === 'edit-profile') {
     const user = state.session.user;
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="edit-profile-title"><div class="modal-head"><div><p class="modal-kicker">ADMIN ACCOUNT</p><h2 id="edit-profile-title">Edit Profile</h2></div><button class="close" data-action="modal-close" aria-label="Close Edit Profile">×</button></div><div class="modal-profile"><div class="profile-avatar profile-avatar-preview" id="profile-photo-preview">${avatarMarkup(user)}</div><div><strong>${h(user.name)}</strong><p>${h(user.email)}</p></div></div><section class="modal-section"><h3>Profile photo</h3><p>Choose a clear photo for your account and header.</p><form id="profile-photo-form"><div class="field"><label for="profile-photo">Upload image</label><input id="profile-photo" type="file" accept="image/png,image/jpeg,image/webp"></div>${user.profileImageUrl ? '<label class="check-row"><input type="checkbox" name="removePhoto"> Remove current picture</label>' : ''}<div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn" type="submit">Save Profile</button></div></form></section><section class="modal-section"><h3>Security</h3><p>Change your password without leaving this window.</p><form id="password-form"><div class="field-row"><div class="field"><label for="current-password">Current password</label><input id="current-password" name="currentPassword" type="password" autocomplete="current-password" required></div><div class="field"><label for="new-password">New password</label><input id="new-password" name="newPassword" type="password" minlength="8" autocomplete="new-password" required></div></div><button class="btn secondary block" type="submit">Save New Password</button></form></section></div></div>`;
   } else if (modal.kind === 'update-app') {
@@ -1018,7 +1023,7 @@ function showModal(modal) {
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal filter-modal" role="dialog" aria-modal="true" aria-labelledby="records-filter-title"><div class="modal-head"><div><p class="modal-kicker">ATTENDANCE RECORDS</p><h2 id="records-filter-title">Filter Date Range</h2></div><button class="close" data-action="modal-close" aria-label="Close date filter">×</button></div><p>Records show today by default. Choose another date range when needed.</p><form id="records-filter"><div class="field-row"><div class="field"><label for="records-from">From</label><input id="records-from" type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label for="records-to">To</label><input id="records-to" type="date" name="to" value="${h(range.end)}" required></div></div><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn" type="submit">Apply Filter</button></div></form></div></div>`;
   } else if (modal.kind === 'employee-confirm') {
     const { input, editing } = modal;
-    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="employee-confirm-title"><div class="modal-head"><div><p class="modal-kicker">REVIEW ACTION</p><h2 id="employee-confirm-title">Review employee account</h2></div><button class="close" data-action="modal-close" aria-label="Close employee review">×</button></div><p>Check these details before ${editing ? 'updating' : 'creating'} the account.</p><div class="review-list"><div class="review-row"><span>Action</span><strong>${editing ? 'Update employee' : 'Create employee'}</strong></div><div class="review-row"><span>Name</span><strong>${h(input.name)}</strong></div><div class="review-row"><span>Username</span><strong>${h(input.username)}</strong></div><div class="review-row"><span>Working Hours</span><strong>${h(input.scheduleType === 'STANDARD' ? 'Standard' : 'Custom')} · ${h(formatClockText(input.scheduleStart))}–${h(formatClockText(input.scheduleEnd))}</strong></div>${editing ? `<div class="review-row"><span>Apply schedule from</span><strong>${h(numericDate(input.scheduleEffectiveDate))}</strong></div>` : ''}<div class="review-row"><span>Workdays</span><strong>${h(workdayLabel(input.workdays))}</strong></div>${editing ? `<div class="review-row"><span>Account</span><strong>${input.active ? 'Active' : 'Disabled'}</strong></div>` : ''}<div class="review-row"><span>Password</span><strong>${input.password ? (editing ? 'Will be changed' : 'Temporary password is set') : 'Keep current password'}</strong></div></div><div class="notice warn">Confirm only after reviewing the employee login and schedule.</div><form id="employee-confirm-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm &amp; ${editing ? 'Save' : 'Create'}</button></div></form></div></div>`;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="employee-confirm-title"><div class="modal-head"><div><p class="modal-kicker">REVIEW ACTION</p><h2 id="employee-confirm-title">Review employee account</h2></div><button class="close" data-action="modal-close" aria-label="Close employee review">×</button></div><p>Check these details before ${editing ? 'updating' : 'creating'} the account.</p><div class="review-list"><div class="review-row"><span>Action</span><strong>${editing ? 'Update employee' : 'Create employee'}</strong></div><div class="review-row"><span>Name</span><strong>${h(input.name)}</strong></div><div class="review-row"><span>Username</span><strong>${h(input.username)}</strong></div><div class="review-row"><span>Working Hours</span><strong>${h(input.scheduleType === 'STANDARD' ? 'Standard' : 'Custom')} · ${h(formatClockText(input.scheduleStart))}–${h(formatClockText(input.scheduleEnd))}</strong></div>${editing ? `<div class="review-row"><span>Apply schedule from</span><strong>${h(numericDate(input.scheduleEffectiveDate))}</strong></div>` : ''}<div class="review-row"><span>Workdays</span><strong>${h(workdayLabel(input.workdays))}</strong></div>${editing ? `<div class="review-row"><span>Account</span><strong>${input.active ? 'Active' : 'Disabled'}</strong></div>` : ''}<div class="review-row"><span>Password</span><strong>${input.password ? (editing ? 'Will be changed' : 'Temporary password is set') : 'Keep current password'}</strong></div></div><div class="notice warn">Confirm only after reviewing the employee login and schedule.</div><form id="employee-confirm-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="employee-back">Go back</button><button class="btn" type="submit">Confirm &amp; ${editing ? 'Save' : 'Create'}</button></div></form></div></div>`;
   } else if (modal.kind === 'attendance-confirm') {
     const { input, employeeName } = modal;
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="attendance-confirm-title"><div class="modal-head"><div><p class="modal-kicker">REVIEW ACTION</p><h2 id="attendance-confirm-title">Review attendance changes</h2></div><button class="close" data-action="modal-close" aria-label="Close attendance review">×</button></div><p>Verify the intervals before saving this workday.</p><div class="review-list"><div class="review-row"><span>Employee</span><strong>${h(employeeName)}</strong></div><div class="review-row"><span>Work date</span><strong>${h(numericDate(input.workDate))}</strong></div>${input.segments.map((segment, index) => `<div class="review-row"><span>Interval ${index + 1}</span><strong>${h(segment.timeIn)}${segment.timeInNextDay ? ' (+1 day)' : ''} → ${h(segment.timeOut || 'Open')}${segment.timeOutNextDay ? ' (+1 day)' : ''} · ${segment.offsite ? 'Offsite' : 'Onsite'}<br>Reason: ${h(segment.reason || '—')}<br>Field Assignment: ${h(segment.fieldAssignment || '—')}</strong></div>`).join('')}</div><div class="notice warn">Edited punches replace the active time and keep the original in the audit trail. Unchanged punches keep their selfie, GPS, and verification.</div><form id="attendance-confirm-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm &amp; Save</button></div></form></div></div>`;
@@ -1049,9 +1054,14 @@ function showModal(modal) {
     const holiday = modal.holiday;
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="delete-holiday-title"><div class="modal-head"><div><p class="modal-kicker">CONFIRM DELETION</p><h2 id="delete-holiday-title">Remove holiday?</h2></div><button class="close" data-action="modal-close" aria-label="Close holiday deletion">×</button></div><p><strong>${h(holiday.name)}</strong> · ${h(numericDate(holiday.date))}</p><p class="notice warn">Employees will be scheduled normally on this date after removal.</p><form id="delete-holiday-form"><input type="hidden" name="date" value="${h(holiday.date)}"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn danger" type="submit">Confirm removal</button></div></form></div></div>`;
   }
-  requestAnimationFrame(() => holder.querySelector('.close')?.focus());
+  requestAnimationFrame(() => holder.querySelector(modal.kind === 'employee-editor' ? '[name="name"]' : '.close')?.focus());
 }
-function closeModal() { state.modal = null; const holder = document.getElementById('modal-root'); if (holder) holder.innerHTML = ''; }
+function closeModal() {
+  const employeeModal = ['employee-editor', 'employee-confirm'].includes(state.modal?.kind);
+  state.modal = null;
+  const holder = document.getElementById('modal-root'); if (holder) holder.innerHTML = '';
+  if (employeeModal && state.section === 'employees') document.querySelector('[data-action="employee-new"]')?.focus();
+}
 async function loadProofSelfies(punches) {
   await Promise.all(punches.filter(item => item.hasSelfie).map(async item => {
     try {
@@ -1244,8 +1254,17 @@ document.addEventListener('click', async event => {
       const employeeId = node.dataset.userId, workDate = node.dataset.workDate;
       closeModal(); await go('backfill'); await loadBackfillDay(employeeId, workDate); return;
     }
-    if (action === 'employee-new') { state.selectedEmployee = null; return renderView(); }
-    if (action === 'employee-edit') { state.selectedEmployee = state.employees.find(e => e.id === node.dataset.id); return renderView(); }
+    if (action === 'employee-new') return showModal({ kind: 'employee-editor' });
+    if (action === 'employee-edit') {
+      const employee = state.employees.find(e => e.id === node.dataset.id);
+      if (employee) showModal({ kind: 'employee-editor', employee });
+      return;
+    }
+    if (action === 'employee-back') {
+      const review = state.modal;
+      if (review?.kind === 'employee-confirm') showModal({ kind: 'employee-editor', employee: review.employee, draft: review.input });
+      return;
+    }
     if (action === 'employee-delete') {
       const employee = state.employees.find(e => e.id === node.dataset.id);
       if (employee) showModal({ kind: 'delete-employee', employee });
@@ -1419,7 +1438,7 @@ document.addEventListener('submit', async event => {
     if (id === 'delete-employee-form') {
       if (values.confirmation !== 'DELETE') throw new Error('Type DELETE to confirm.');
       await api(`/api/admin/employees/${values.id}`, { method: 'DELETE' });
-      closeModal(); state.selectedEmployee = null; await loadEmployees(); await loadAdmin(state.adminRange || currentRange());
+      closeModal(); await loadEmployees(); await loadAdmin(state.adminRange || currentRange());
       renderView(); return flash('Employee account and related records deleted.', 'success');
     }
     if (id === 'delete-holiday-form') {
@@ -1483,14 +1502,14 @@ document.addEventListener('submit', async event => {
         ...(values.id ? { scheduleEffectiveDate: values.scheduleEffectiveDate } : {}),
         workdays: [...form.querySelectorAll('input[name="day"]:checked')].map(el => Number(el.value)), active: !!values.active };
       const editing = !!values.id;
-      showModal({ kind: 'employee-confirm', input, employeeId: values.id || null, editing }); return;
+      showModal({ kind: 'employee-confirm', input, employee: state.modal?.employee, employeeId: values.id || null, editing }); return;
     }
     if (id === 'employee-confirm-form') {
       const pending = state.modal;
       if (pending?.kind !== 'employee-confirm') throw new Error('Employee review expired. Please review the form again.');
       const { input, employeeId, editing } = pending;
       await api(editing ? `/api/admin/employees/${employeeId}` : '/api/admin/employees', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(input) });
-      closeModal(); state.selectedEmployee = null; await loadEmployees(); renderView(); return flash(editing ? 'Employee updated successfully.' : 'Employee account created successfully.', 'success');
+      closeModal(); await loadEmployees(); renderView(); return flash(editing ? 'Employee updated successfully.' : 'Employee account created successfully.', 'success');
     }
     if (id === 'backfill-form') {
       const { punches: _loadedPunches, ...input } = backfillInputFromForm(form);
