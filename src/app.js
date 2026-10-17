@@ -215,13 +215,16 @@ function formatClockText(value) {
   const [hours, minutes] = value.split(':').map(Number);
   return `${hours % 12 || 12}:${String(minutes).padStart(2, '0')} ${hours >= 12 ? 'PM' : 'AM'}`;
 }
+function weekdayLabel(date) {
+  return `${new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`))}.`;
+}
 function prettyDate(date) {
   if (!date) return '';
-  return new Intl.DateTimeFormat('en-PH', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`));
+  return `${new Intl.DateTimeFormat('en-PH', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`))} ${weekdayLabel(date)}`;
 }
 function numericDate(date) {
   if (!date) return '';
-  return new Intl.DateTimeFormat('en-PH', { month: '2-digit', day: '2-digit', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`));
+  return `${new Intl.DateTimeFormat('en-PH', { month: '2-digit', day: '2-digit', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`))} ${weekdayLabel(date)}`;
 }
 function incomingHolidays(limit = 4) {
   const dates = new Map((config()?.legalHolidays || []).filter(item => item.type === 'Special working').map(item => [item.date, item]));
@@ -355,7 +358,7 @@ function intervalDatesMarkup(segment, workDate) {
   if (!safeDate(workDate)) return '';
   if (segment.dateError) return `<p class="notice warn">${h(segment.dateError)}</p>`;
   if (!segment.inUtc) return '';
-  return `<p class="tiny-label">Time In date: ${h(numericDate(localDateTime(segment.inUtc, timeZone).date))}${segment.outUtc ? ` · Time Out date: ${h(numericDate(localDateTime(segment.outUtc, timeZone).date))}` : ''}${segment.timeInNextDay || segment.timeOutNextDay ? ` (+1 day). Attendance stays on ${h(numericDate(workDate))}.` : ''}</p>`;
+  return `<p class="tiny-label">Time In date: ${h(numericDate(localDateTime(segment.inUtc, timeZone).date))}${segment.outUtc ? ` · Time Out date: ${h(numericDate(localDateTime(segment.outUtc, timeZone).date))}` : ''}${segment.timeInNextDay || segment.timeOutNextDay ? ` (+1 day). Attendance stays on ${h(numericDate(workDate))}` : ''}</p>`;
 }
 function updateIntervalPreviews(form) {
   state.backfillDraft = { ...state.backfillDraft, ...backfillInputFromForm(form) };

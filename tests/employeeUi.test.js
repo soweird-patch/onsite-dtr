@@ -37,6 +37,7 @@ test('editor, employee history, and review keep ten minutes undertime while addi
   assert.ok(editor.includes('OT total (remaining OT + ND): <strong>2h 00m'));
   assert.ok(editor.includes('Regular shortage after this interval: 0h 10m'));
   const history=app.employeeAttendanceDayCardSegments(date,punches);
+  assert.ok(history.includes('Thu.'));
   assert.ok(history.includes('Undertime</span><strong>0h 10m'));
   assert.ok(history.includes('Overtime</span><strong>2h 00m'));
   const queue=app.renderPremiumQueue();
@@ -64,11 +65,11 @@ test('admin interval editor shows regular top-up, OT, and night-only allocations
   assert.ok(html.includes('Remaining OT</span><strong>1h 00m'));
   assert.ok(html.includes('Night differential</span><strong>2h 00m'));
   assert.match(html,/data-day-hours[^>]*>[\s\S]*OT total \(remaining OT \+ ND\): <strong>3h 00m/);
-  assert.ok(html.includes('Time Out date: 10/16/2026 (+1 day). Attendance stays on 10/15/2026.'));
+  assert.ok(html.includes('Time Out date: 10/16/2026 Fri. (+1 day). Attendance stays on 10/15/2026 Thu.'));
   assert.ok(!html.includes('name="timeOutNextDay"'));
   app.state.backfillDraft.segments.push({timeIn:'00:30',timeOut:'06:00'});
   const overnightHtml=app.renderBackfill();
-  assert.ok(overnightHtml.includes('Time In date: 10/16/2026 · Time Out date: 10/16/2026 (+1 day)'));
+  assert.ok(overnightHtml.includes('Time In date: 10/16/2026 Fri. · Time Out date: 10/16/2026 Fri. (+1 day)'));
   assert.ok(overnightHtml.includes('Night differential</span><strong>5h 30m'));
   app.state.backfillDraft.workDate='';
   assert.doesNotThrow(()=>app.renderBackfill());

@@ -35,6 +35,7 @@ test('report renders every interval detail, escapes text, and includes open and 
   assert.notEqual(details[0].fieldAssignment, details[1].fieldAssignment);
   const app = appHarness();
   const html = app.renderReportEmployee(fixture, { start: '2026-10-01', end: '2026-10-01' }, 'QA', true);
+  assert.ok(html.includes('data-label="Date">10/01/2026 Thu.</td>'));
   assert.ok(html.indexOf('Reasons and Field Assignments') > html.indexOf('Night differential</th>'));
   assert.ok(html.includes('<th>Date</th><th>Time In</th><th>Time Out</th><th>Reason</th><th>Field Assignment</th>'));
   assert.ok(html.includes('&lt;script&gt;unsafe&lt;/script&gt;'));
@@ -131,6 +132,7 @@ test('overnight PDF rows and night approval stay on the shift start date across 
   assert.equal(report.totals.night,480);
   assert.equal(report.totals.overtime,480);
   const html=app.renderReportEmployee(report,{start:date,end:date},'QA',true);
+  assert.ok(html.includes('data-label="Date">10/25/2026 Sun.</td>'));
   assert.match(html,/6:00\s*AM \(\+1 day\)/);
   assert.equal(attendanceDetails(report.rows)[0].date,date);
   app.state.reportRange={start:nextDay,end:nextDay};
