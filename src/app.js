@@ -2,7 +2,7 @@ import { ConvexClient, ConvexHttpClient } from 'convex/browser';
 import { api as functions } from '../convex/_generated/api.js';
 import { attendanceDetails } from './reportDetails.js';
 import { groupPunches, holidayFor, isPayrollDayReady, isPayrollReady, isScheduledWorkday,
-  expectedTimeOut, localDateTime, payrollDayTotals, premiumCalculationKey, punchProvenance, safeDate, shiftInstant, workBreakdown, workBreakdownIntervals, workIntervalBreakdowns } from '../rules.js';
+  expectedTimeOut, localDateTime, payrollDayTotals, premiumCalculationKey, punchProvenance, resolveWorkInterval, safeDate, shiftInstant, workBreakdown, workBreakdownIntervals, workIntervalBreakdowns } from '../rules.js';
 
 const root = document.getElementById('app');
 const deploymentUrl = import.meta.env.VITE_CONVEX_URL;
@@ -329,20 +329,37 @@ function intervalHoursForPunches(date, punches) {
   return workIntervalBreakdowns(date, groupPunches(punches).map(group => ({ number: group.number,
     inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc })));
 }
+function resolvedDraftIntervals(draft) {
+  let previousOut = null;
+  return draft.segments.map(segment => {
+    try {
+      const resolved = resolveWorkInterval(draft.workDate, segment, previousOut);
+      previousOut = resolved.outUtc;
+      return { ...segment, ...resolved };
+    } catch (error) {
+      previousOut = null;
+      return { ...segment, inUtc: null, outUtc: null, dateError: error.message };
+    }
+  });
+}
 function draftIntervalHours(draft) {
   if (!safeDate(draft.workDate)) return [];
-  return workIntervalBreakdowns(draft.workDate, draft.segments.map((segment, index) => {
-    try { return { number: index + 1,
-      inUtc: segment.timeIn ? shiftInstant(draft.workDate, segment.timeIn, !!segment.timeInNextDay) : null,
-      outUtc: segment.timeOut ? shiftInstant(draft.workDate, segment.timeOut, !!segment.timeOutNextDay) : null };
-    } catch { return {}; }
-  }));
+  return workIntervalBreakdowns(draft.workDate, resolvedDraftIntervals(draft));
+}
+function intervalDatesMarkup(segment, workDate) {
+  if (!safeDate(workDate)) return '';
+  if (segment.dateError) return `<p class="notice warn">${h(segment.dateError)}</p>`;
+  if (!segment.inUtc) return '';
+  return `<p class="tiny-label">Time In date: ${h(numericDate(localDateTime(segment.inUtc, timeZone).date))}${segment.outUtc ? ` · Time Out date: ${h(numericDate(localDateTime(segment.outUtc, timeZone).date))}` : ''}${segment.timeInNextDay || segment.timeOutNextDay ? ` (+1 day). Attendance stays on ${h(numericDate(workDate))}.` : ''}</p>`;
 }
 function updateIntervalPreviews(form) {
   state.backfillDraft = { ...state.backfillDraft, ...backfillInputFromForm(form) };
   const hours = draftIntervalHours(state.backfillDraft);
   for (const [index, element] of [...form.querySelectorAll('[data-interval-hours]')].entries())
     element.innerHTML = intervalHoursMarkup(hours[index]);
+  const segments = resolvedDraftIntervals(state.backfillDraft);
+  for (const [index, element] of [...form.querySelectorAll('[data-interval-dates]')].entries())
+    element.innerHTML = intervalDatesMarkup(segments[index], state.backfillDraft.workDate);
 }
 function intervalText(punches, date, slot) {
   return groupPunches(punches).map(group => formatShiftTime(group[slot === 'IN' ? 'inPunch' : 'outPunch']?.timeUtc, date)).join(' / ');
@@ -504,18 +521,20 @@ async function loadBackfillDay(employeeId, workDate) {
 }
 function backfillInputFromForm(form) {
   const draft = state.backfillDraft || blankBackfillDraft();
-  return { employeeId: form.elements.employeeId.value, workDate: form.elements.workDate.value,
+  const input = { employeeId: form.elements.employeeId.value, workDate: form.elements.workDate.value,
     expectedIds: draft.expectedIds, punches: draft.punches,
     segments: [...form.querySelectorAll('.manual-interval')].map((row, index) => ({
       inId: draft.segments[index]?.inId || null, outId: draft.segments[index]?.outId || null,
       timeIn: row.querySelector('[name="timeIn"]').value,
       timeOut: row.querySelector('[name="timeOut"]').value,
-      timeInNextDay: row.querySelector('[name="timeInNextDay"]').checked,
-      timeOutNextDay: row.querySelector('[name="timeOutNextDay"]').checked,
+      timeInNextDay: row.querySelector('[name="timeIn"]').value === draft.segments[index]?.timeIn && !!draft.segments[index]?.timeInNextDay,
+      timeOutNextDay: row.querySelector('[name="timeOut"]').value === draft.segments[index]?.timeOut && !!draft.segments[index]?.timeOutNextDay,
       offsite: row.querySelector('[name="offsite"]').checked,
       reason: row.querySelector('[name="intervalReason"]').value,
       fieldAssignment: row.querySelector('[name="fieldAssignment"]').value
     })) };
+  input.segments = resolvedDraftIntervals(input).map(({ inUtc, outUtc, dateError, ...segment }) => segment);
+  return input;
 }
 async function go(section) {
   stopCamera(); state.section = section; state.modal = null; state.message = '';
@@ -792,12 +811,13 @@ function renderSettings() {
 function renderBackfill() {
   const draft = state.backfillDraft || blankBackfillDraft();
   const intervalHours = draftIntervalHours(draft);
-  const segments = draft.segments.map((segment, index) => {
+  const segments = resolvedDraftIntervals(draft).map((segment, index) => {
     const saved = groupPunches(draft.punches)[index];
     return `<section class="manual-interval" data-index="${index}">
     <div class="manual-interval-head"><strong>${index === 0 ? 'First work interval' : `Return to work · interval ${index + 1}`}</strong>${index > 0 && !segment.inId && !segment.outId ? `<button class="link-button" type="button" data-action="remove-manual-interval" data-index="${index}">Remove</button>` : ''}</div>
     <div class="field-row"><div class="field"><label>Time In</label><input name="timeIn" type="time" value="${h(segment.timeIn)}" required></div><div class="field"><label>Time Out ${index === 0 ? '(optional until shift ends)' : ''}</label><input name="timeOut" type="time" value="${h(segment.timeOut)}" ${index > 0 ? 'required' : ''}></div></div>
-    <div class="manual-options">${index > 0 ? `<label class="check-row"><input name="timeInNextDay" type="checkbox" ${segment.timeInNextDay ? 'checked' : ''}> Time In after midnight</label>` : '<input name="timeInNextDay" type="checkbox" hidden>'}<label class="check-row"><input name="timeOutNextDay" type="checkbox" ${segment.timeOutNextDay ? 'checked' : ''}> Time Out after midnight (by 6:00 AM)</label><label class="check-row"><input name="offsite" type="checkbox" ${segment.offsite ? 'checked' : ''}> Offsite / field work</label></div>
+    <div data-interval-dates="${index}" aria-live="polite">${intervalDatesMarkup(segment, draft.workDate)}</div>
+    <div class="manual-options"><label class="check-row"><input name="offsite" type="checkbox" ${segment.offsite ? 'checked' : ''}> Offsite / field work</label></div>
     <div class="field"><label>Reason (optional)</label><textarea name="intervalReason" maxlength="300" placeholder="Add a reason for this interval (optional)">${h(segment.reason || '')}</textarea></div><div class="field"><label>Field Assignment</label><textarea name="fieldAssignment" maxlength="300" placeholder="Client, location, or task for this interval (optional)">${h(segment.fieldAssignment || '')}</textarea></div>
     <div data-interval-hours="${index}" aria-live="polite">${intervalHoursMarkup(intervalHours[index])}</div>
     ${saved ? `<div class="manual-saved-proof">${[saved.inPunch, saved.outPunch].filter(Boolean).map(punch => `<span>${punch.slot === 'IN' ? 'In' : 'Out'}: ${h(punchSource(punch))} · ${h(punch.verification.toLowerCase())}${punch.hasSelfie ? ' · selfie' : ''}${mapLink(punch, 'Map ↗')}</span>`).join('')}</div><p class="tiny-label">Unchanged times keep the original selfie, GPS, and approval. Edited times become audited admin corrections.</p>` : ''}</section>`;

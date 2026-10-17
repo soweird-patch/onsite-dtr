@@ -24,7 +24,7 @@ test('admin interval editor shows regular top-up, OT, and night-only allocations
   app.state.backfillDraft={employeeId:'worker',workDate:'2026-10-15',expectedIds:[],punches:[],segments:[
     {timeIn:'08:00',timeOut:'15:00',reason:'First assignment'},
     {timeIn:'17:00',timeOut:'20:00',reason:'Second assignment'},
-    {timeIn:'22:00',timeOut:'00:00',timeOutNextDay:true,reason:'Night assignment'}
+    {timeIn:'22:00',timeOut:'00:00',reason:'Night assignment'}
   ]};
   const html=app.renderBackfill();
   assert.ok(html.includes('Reason (optional)'));
@@ -35,6 +35,12 @@ test('admin interval editor shows regular top-up, OT, and night-only allocations
   assert.ok(html.includes('Fills regular shortage</span><strong>2h 00m'));
   assert.ok(html.includes('Pending OT</span><strong>1h 00m'));
   assert.ok(html.includes('Night differential</span><strong>2h 00m'));
+  assert.ok(html.includes('Time Out date: 10/16/2026 (+1 day). Attendance stays on 10/15/2026.'));
+  assert.ok(!html.includes('name="timeOutNextDay"'));
+  app.state.backfillDraft.segments.push({timeIn:'00:30',timeOut:'06:00'});
+  const overnightHtml=app.renderBackfill();
+  assert.ok(overnightHtml.includes('Time In date: 10/16/2026 · Time Out date: 10/16/2026 (+1 day)'));
+  assert.ok(overnightHtml.includes('Night differential</span><strong>5h 30m'));
   app.state.backfillDraft.workDate='';
   assert.doesNotThrow(()=>app.renderBackfill());
 });

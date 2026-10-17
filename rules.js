@@ -80,6 +80,27 @@ export function shiftInstant(date, time, nextDay = false) {
   return new Date(`${nextDay ? nextDate(date) : date}T${time}:00+08:00`).toISOString();
 }
 
+// Keep every interval on its starting workday while resolving midnight clock
+// times to actual calendar dates. Explicit flags support older saved forms.
+export function resolveWorkInterval(date, segment, previousOutUtc = null) {
+  if (!safeDate(date)) throw new Error('Valid work date is required.');
+  const timeIn = String(segment.timeIn || ''), timeOut = String(segment.timeOut || '');
+  if (timeIn) clockMinutes(timeIn);
+  if (timeOut) clockMinutes(timeOut);
+  const timeInNextDay = !!segment.timeInNextDay || !!(timeIn && previousOutUtc &&
+    timeIn <= NIGHT_END && shiftInstant(date, timeIn) < previousOutUtc);
+  const timeOutNextDay = !!segment.timeOutNextDay || timeInNextDay || !!(timeIn && timeOut && timeOut < timeIn);
+  if (timeInNextDay && timeIn > NIGHT_END) throw new Error('Next-day Time In must be no later than 6:00 AM.');
+  if (timeOutNextDay && timeOut > NIGHT_END) throw new Error('Next-day Time Out must be no later than 6:00 AM.');
+  const inUtc = timeIn ? shiftInstant(date, timeIn, timeInNextDay) : null;
+  const outUtc = timeOut ? shiftInstant(date, timeOut, timeOutNextDay) : null;
+  if (outUtc && !inUtc) throw new Error('Time In is required before Time Out.');
+  if (outUtc && outUtc <= inUtc) throw new Error('Time Out must be after Time In.');
+  if (previousOutUtc && inUtc && inUtc < previousOutUtc)
+    throw new Error('Interval must start after the previous Time Out (or at the same time).');
+  return { inUtc, outUtc, timeInNextDay, timeOutNextDay };
+}
+
 function overlapMinutes(start, end, windowStart, windowEnd) {
   return Math.max(0, Math.floor((Math.min(end, windowEnd) - Math.max(start, windowStart)) / 60000));
 }

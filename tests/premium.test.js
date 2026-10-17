@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { createHash, scryptSync } from 'node:crypto';
 import { getFunctionName } from 'convex/server';
 import { login } from '../convex/authActions.js';
-import { approveAttendanceDay, autoTimeOut, backfill, continueOffsite, reviewExtension, syncAutomaticPremiums,
+import { approveAttendanceDay, attendance, autoTimeOut, backfill, continueOffsite, reviewExtension, syncAutomaticPremiums,
   saveAdminAttendanceDay, submitPunch, updateEmployee, verify, createEmployee, userForLogin,
   migrateEmployeeUsernames, loginAttempt, recordLoginFailure, issueSession } from '../convex/core.js';
-import { localDateTime, payrollDayTotals, shiftInstant } from '../rules.js';
+import { localDateTime, payrollDayTotals, shiftInstant, workBreakdownIntervals } from '../rules.js';
 import { punchView } from '../convex/lib.js';
 
 function fixture() {
@@ -235,6 +235,100 @@ test('admin-created offsite shift generates reviewable extra hours and next-day 
   await assert.rejects(backfill._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: '2026-10-16',
     timeIn: '08:00', timeOut: '06:01', timeOutNextDay: true, offsite: true,
     reason: 'Invalid overnight time' } }), /no later than 6:00 AM/);
+});
+
+test('midnight and 6 AM intervals save on the starting work date without next-day flags', async () => {
+  const f = fixture(), date = '2026-12-31';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  const segments = [
+    { timeIn: '08:00', timeOut: '17:00' },
+    { timeIn: '22:00', timeOut: '00:00', reason: 'Night work' },
+    { timeIn: '00:00', timeOut: '06:00', fieldAssignment: 'Client site' }
+  ];
+  await saveAdminAttendanceDay._handler(f.ctx, { token: f.token, input: { employeeId: userId,
+    workDate: date, expectedIds: [], segments } });
+  const active = [...f.tables.punches.values()].filter(p => p.active);
+  assert.equal(active.length, 6);
+  assert.ok(active.every(p => p.workDate === date));
+  const midnightOut = active.find(p => p.segment === 2 && p.slot === 'OUT');
+  const midnightIn = active.find(p => p.segment === 3 && p.slot === 'IN');
+  assert.equal(midnightOut.timeUtc, shiftInstant(date, '00:00', true));
+  assert.equal(midnightIn.timeUtc, midnightOut.timeUtc);
+  assert.equal(active.find(p => p.segment === 3 && p.slot === 'OUT').timeUtc, shiftInstant(date, '06:00', true));
+  const extension = [...f.tables.extensions.values()][0];
+  assert.equal(extension.workDate, date);
+  assert.equal(extension.nightDecision, 'PENDING');
+  assert.deepEqual(payrollDayTotals(date, active, extension), { regular: 480, undertime: 0, overtime: 0, night: 0 });
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id, stage: 'NIGHT', decision: 'APPROVED' });
+  assert.equal(payrollDayTotals(date, active, extension).night, 480);
+  const calculationKey = extension.calculationKey;
+  const reloadedSegments = segments.map((segment, index) => ({ ...segment,
+    inId: active.find(p => p.segment === index + 1 && p.slot === 'IN')._id,
+    outId: active.find(p => p.segment === index + 1 && p.slot === 'OUT')._id
+  }));
+  const result = await saveAdminAttendanceDay._handler(f.ctx, { token: f.token, input: { employeeId: userId,
+    workDate: date, expectedIds: active.map(p => p._id), segments: reloadedSegments } });
+  assert.equal(result.preserved, 6);
+  assert.equal(result.replaced, 0);
+  assert.equal(extension.calculationKey, calculationKey);
+  assert.equal(extension.nightDecision, 'APPROVED');
+  const before = JSON.stringify([...f.tables.punches.values()]);
+  await assert.rejects(saveAdminAttendanceDay._handler(f.ctx, { token: f.token, input: { employeeId: userId,
+    workDate: date, expectedIds: active.map(p => p._id), segments: reloadedSegments.map((segment, index) =>
+      index === 2 ? { ...segment, timeOut: '06:01' } : segment) } }), /no later than 6:00 AM/);
+  assert.equal(JSON.stringify([...f.tables.punches.values()]), before);
+  assert.equal(extension.nightDecision, 'APPROVED');
+});
+
+test('a return after midnight and partial Time Out backfill infer the next calendar day', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  await saveAdminAttendanceDay._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: date,
+    expectedIds: [], segments: [{ timeIn: '08:00', timeOut: '15:00' }, { timeIn: '00:30', timeOut: '06:00' }] } });
+  const active = [...f.tables.punches.values()].filter(p => p.active);
+  assert.equal(active.find(p => p.segment === 2 && p.slot === 'IN').timeUtc, shiftInstant(date, '00:30', true));
+  const breakdown = workBreakdownIntervals(date, [
+    { inUtc: active[0].timeUtc, outUtc: active[1].timeUtc },
+    { inUtc: active[2].timeUtc, outUtc: active[3].timeUtc }
+  ]);
+  assert.deepEqual([breakdown.regularMinutes, breakdown.undertimeMinutes, breakdown.overtimeCandidateMinutes, breakdown.nightCandidateMinutes],
+    [360, 120, 0, 330]);
+  const otherDate = '2026-10-16';
+  await backfill._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: otherDate, timeIn: '22:00' } });
+  await backfill._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: otherDate, timeOut: '00:00' } });
+  const exit = [...f.tables.punches.values()].find(p => p.workDate === otherDate && p.slot === 'OUT' && p.active);
+  assert.equal(exit.timeUtc, shiftInstant(otherDate, '00:00', true));
+  await assert.rejects(backfill._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: otherDate,
+    timeOut: '06:01', replaceExisting: true } }), /no later than 6:00 AM/);
+  assert.equal(exit.active, true);
+});
+
+test('an employee midnight or exact 6 AM Time Out remains attached to the previous workday', async () => {
+  const RealDate = globalThis.Date;
+  try {
+    for (const time of ['00:00', '06:00']) {
+      const f = fixture(), date = '2026-10-15', userId = await f.addUser('Worker', 'employee');
+      await f.authorize(userId);
+      f.ctx.db.system = { async get() { return { contentType: 'image/jpeg', size: 2000 }; } };
+      await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'IN', method: 'OFFSITE',
+        timeUtc: shiftInstant(date, '08:00'), verification: 'APPROVED', active: true });
+      const instant = RealDate.parse(shiftInstant(date, time, true));
+      globalThis.Date = class extends RealDate {
+        constructor(...args) { super(...(args.length ? args : [instant])); }
+        static now() { return instant; }
+      };
+      const before = await attendance._handler(f.ctx, { token: f.token, from: date, to: date });
+      assert.equal(before.openShift.workDate, date);
+      const result = await submitPunch._handler(f.ctx, { token: f.token, selfieId: 'photo',
+        input: { slot: 'OUT', latitude: 14.5, longitude: 121, accuracyM: 10 } });
+      assert.equal(result.punch.workDate, date);
+      assert.equal(result.punch.timeUtc, shiftInstant(date, time, true));
+      assert.equal([...f.tables.extensions.values()][0].workDate, date);
+      globalThis.Date = RealDate;
+    }
+  } finally { globalThis.Date = RealDate; }
 });
 
 test('replace existing overwrites matching same-day punches and preserves audit history', async () => {

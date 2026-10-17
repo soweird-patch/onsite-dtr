@@ -18,7 +18,13 @@ Multiple Time In/Time Out intervals belong to one work date. A later interval be
 
 Example: 8:00 AM-3:00 PM gives 6 regular hours after lunch. Returning from 5:00-8:00 PM adds 2 regular hours to complete eight, plus 1 pending OT hour. A third interval from 10:00 PM-midnight adds 2 pending night differential hours. If the second daytime interval is absent, those night hours leave the regular shortage at 2 hours.
 
-The admin editor previews each interval's regular hours, contribution to the regular shortage, calculated OT, night differential, and remaining shortage. The preview updates when times or next-day flags change. The approval screen shows the same interval allocation. Saving an interval recalculates payroll and the PDF summary with the same rules.
+The admin editor previews each interval's regular hours, contribution to the regular shortage, calculated OT, night differential, and remaining shortage. The preview updates when times change. The approval screen shows the same interval allocation. Saving an interval recalculates payroll and the PDF summary with the same rules.
+
+## Overnight work dates
+
+Select the date the shift started. Midnight through **6:00 AM the next day** remains part of that work date, including across a month, year, or payroll cutoff. For example, October 25 at 10:00 PM through October 26 at 6:00 AM records eight pending ND hours against **October 25**. It does not create a second attendance day on October 26.
+
+The admin editor automatically resolves a Time Out earlier than Time In to the next calendar day and resolves a later interval starting after midnight after the preceding interval. No after-midnight checkbox is needed. Each interval shows the actual Time In/Out dates; confirmation and reports mark next-day times with **(+1 day)**. Adjacent intervals may share a boundary, such as a midnight Time Out followed by a midnight Time In, without counting a minute twice. Next-day times after 6:00 AM and overlapping intervals are rejected. Employee Time Out at midnight or exactly 6:00 AM also closes the previous open workday. Saving unchanged overnight times preserves the existing punches and premium approvals.
 
 ## Schedule and attendance edits
 

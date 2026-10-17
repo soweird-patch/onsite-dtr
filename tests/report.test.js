@@ -110,3 +110,30 @@ test('report shows employee/admin source and pending OT separately from approved
   assert.ok(html.includes('Employee · Onsite / Admin'));
   assert.ok(!html.includes('Admin offsite'));
 });
+
+test('overnight PDF rows and night approval stay on the shift start date across a cutoff', () => {
+  const app=appHarness(), fixture=reportFixture(1,1), date='2026-10-25', nextDay='2026-10-26';
+  const punches=fixture.rows[0].punches;
+  for(const punch of punches){
+    punch.workDate=date;
+    punch.timeUtc=shiftInstant(date,punch.slot==='IN'?'22:00':'06:00',punch.slot==='OUT');
+  }
+  const extension={userId:'worker',workDate:date,calculationKey:premiumCalculationKey(date,punches),overtimeDecision:'PENDING',nightDecision:'PENDING'};
+  Object.assign(app.state,{employees:[fixture.employee],reportRange:{start:date,end:date},
+    session:{today:nextDay,user:{role:'admin'},settings:{holidays:[]}},adminData:{punches,extensions:[extension],overtime:[]}});
+  let report=app.reportRows()[0];
+  assert.equal(report.rows.length,1);
+  assert.equal(report.rows[0].date,date);
+  assert.equal(report.totals.pendingNight,480);
+  assert.equal(report.totals.night,0);
+  extension.nightDecision='APPROVED';
+  report=app.reportRows()[0];
+  assert.equal(report.totals.night,480);
+  assert.equal(report.totals.overtime,0);
+  const html=app.renderReportEmployee(report,{start:date,end:date},'QA',true);
+  assert.match(html,/6:00\s*AM \(\+1 day\)/);
+  assert.equal(attendanceDetails(report.rows)[0].date,date);
+  app.state.reportRange={start:nextDay,end:nextDay};
+  assert.equal(app.reportRows()[0].rows[0].punches.length,0);
+  assert.equal(app.reportRows()[0].totals.night,0);
+});

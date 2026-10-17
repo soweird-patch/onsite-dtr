@@ -1,8 +1,8 @@
 import { query, mutation, internalQuery, internalMutation } from './_generated/server.js';
 import { internal } from './_generated/api.js';
 import { v } from 'convex/values';
-import { cutoffFor, FLEXIBLE_START_MINUTES, FLEXIBLE_END_MINUTES, groupPunches, holidayFor, localDateTime, premiumCalculationKey, shiftInstant, workBreakdownIntervals } from '../rules.js';
-import { audit, authUser, dateRange, dayNow, digest, distanceMeters, localTimeToUtc,
+import { cutoffFor, FLEXIBLE_START_MINUTES, FLEXIBLE_END_MINUTES, groupPunches, holidayFor, localDateTime, premiumCalculationKey, resolveWorkInterval, shiftInstant, workBreakdownIntervals } from '../rules.js';
+import { audit, authUser, dateRange, dayNow, digest, distanceMeters,
   now, punchView, safeDate, settings, settingsDefault, settingsView, timezone,
   userView, validateEmployee, validEmail, normalizeUsername, validUsername } from './lib.js';
 
@@ -125,7 +125,7 @@ export const attendance = query({ args: { ...tokenArg, from: v.optional(v.string
     const yesterday = new Date(Date.parse(`${dayNow()}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
     const priorIn = await punchFor(ctx, user._id, yesterday, 'IN');
     const priorExtension = await extensionFor(ctx, user._id, yesterday);
-    const openShift = localDateTime(now(), timezone).minutes < 360 && priorIn &&
+    const openShift = now() <= shiftInstant(yesterday, '06:00', true) && priorIn &&
       !await punchFor(ctx, user._id, yesterday, 'OUT')
       ? { workDate: yesterday, inPunch: punchView(priorIn, user.name),
           extension: priorExtension ? extensionView(priorExtension, user.name) : null } : null;
@@ -303,7 +303,7 @@ export const submitPunch = internalMutation({ args: { ...tokenArg, input: v.any(
   if (input.slot === 'IN' && (local.minutes < FLEXIBLE_START_MINUTES || local.minutes > FLEXIBLE_END_MINUTES))
     throw new Error('Time In is available between 6:00 AM and 5:00 PM. Ask admin to record exceptional work.');
   const priorDate = new Date(Date.parse(`${local.date}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
-  const priorIn = local.minutes < 360 ? await punchFor(ctx, user._id, priorDate, 'IN') : null;
+  const priorIn = now() <= shiftInstant(priorDate, '06:00', true) ? await punchFor(ctx, user._id, priorDate, 'IN') : null;
   const priorOpen = priorIn && !await punchFor(ctx, user._id, priorDate, 'OUT');
   if (input.slot === 'IN' && priorOpen)
     throw new Error('Finish the overnight shift before starting a new Time In.');
@@ -345,18 +345,19 @@ export const backfill = mutation({ args: { ...tokenArg, input: v.any() }, handle
   if (!safeDate(input.workDate)) throw new Error('Valid work date is required.');
   const reason = String(input.reason || '').trim();
   if (reason.length > 300) throw new Error('Reason must have at most 300 characters.');
+  const oldIn = await punchFor(ctx, target._id, input.workDate, 'IN');
+  const oldOut = await punchFor(ctx, target._id, input.workDate, 'OUT');
+  const resolved = resolveWorkInterval(input.workDate, {
+    timeIn: input.timeIn || (oldIn ? localDateTime(oldIn.timeUtc, timezone).time : ''),
+    timeOut: input.timeOut || (oldOut ? localDateTime(oldOut.timeUtc, timezone).time : ''),
+    timeOutNextDay: input.timeOut ? input.timeOutNextDay : !!oldOut && localDateTime(oldOut.timeUtc, timezone).date > input.workDate
+  });
   const entries = [];
-  if (input.timeIn) entries.push({ slot: 'IN', time: localTimeToUtc(input.workDate, input.timeIn) });
-  if (input.timeOut) {
-    if (input.timeOutNextDay && input.timeOut > '06:00')
-      throw new Error('Next-day Time Out must be no later than 6:00 AM.');
-    entries.push({ slot: 'OUT', time: shiftInstant(input.workDate, input.timeOut, !!input.timeOutNextDay) });
-  }
+  if (input.timeIn) entries.push({ slot: 'IN', time: resolved.inUtc });
+  if (input.timeOut) entries.push({ slot: 'OUT', time: resolved.outUtc });
   const ot = input.overtimeMinutes === '' || input.overtimeMinutes == null ? null : Number(input.overtimeMinutes);
   if (ot !== null && (!Number.isInteger(ot) || ot < 0 || ot > 1440)) throw new Error('Overtime must be 0–1440 minutes.');
   if (!entries.length && ot === null) throw new Error('Enter a Time In, Time Out, or overtime.');
-  const oldIn = await punchFor(ctx, target._id, input.workDate, 'IN');
-  const oldOut = await punchFor(ctx, target._id, input.workDate, 'OUT');
   const finalIn = entries.find(e => e.slot === 'IN')?.time || oldIn?.timeUtc;
   const finalOut = entries.find(e => e.slot === 'OUT')?.time || oldOut?.timeUtc;
   if (finalOut && !finalIn) throw new Error('Time In is required before Time Out.');
@@ -417,15 +418,8 @@ export const saveAdminAttendanceDay = mutation({ args: { ...tokenArg, input: v.a
     if (!timeIn || (number > 1 && !timeOut)) throw new Error(`Interval ${number} needs both Time In and Time Out.`);
     if (timeOut && !timeIn) throw new Error(`Interval ${number} needs Time In before Time Out.`);
     if (number === 1 && segment.timeInNextDay) throw new Error('The first Time In must be on the work date.');
-    if (segment.timeInNextDay && timeIn > '06:00') throw new Error('Next-day Time In must be no later than 6:00 AM.');
-    if (segment.timeOutNextDay && timeOut > '06:00') throw new Error('Next-day Time Out must be no later than 6:00 AM.');
-    const inUtc = shiftInstant(input.workDate, timeIn, !!segment.timeInNextDay);
-    const outUtc = timeOut ? shiftInstant(input.workDate, timeOut, !!segment.timeOutNextDay) : null;
-    if (outUtc && outUtc <= inUtc) throw new Error(`Interval ${number}: Time Out must be after Time In.`);
-    if (previousOut && inUtc <= previousOut) throw new Error(`Interval ${number} must start after the previous Time Out.`);
     if (number > 1 && !previousOut) throw new Error('Finish the previous interval before adding another.');
-    if (outUtc && outUtc > shiftInstant(input.workDate, '06:00', true))
-      throw new Error('Time Out cannot exceed the 6:00 AM next-day cutoff.');
+    const { inUtc, outUtc } = resolveWorkInterval(input.workDate, segment, previousOut);
     const offsite = !!segment.offsite;
     const oldInterval = oldByKey.get(`${number}|IN`) || oldByKey.get(`${number}|OUT`);
     const intervalReason = String(segment.reason ?? reason ?? '').trim();
