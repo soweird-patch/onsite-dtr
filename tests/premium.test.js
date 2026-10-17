@@ -1,12 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, scryptSync } from 'node:crypto';
+import { getFunctionName } from 'convex/server';
+import { login } from '../convex/authActions.js';
 import { approveAttendanceDay, autoTimeOut, backfill, continueOffsite, reviewExtension, syncAutomaticPremiums,
-  saveAdminAttendanceDay, submitPunch, updateEmployee, verify } from '../convex/core.js';
+  saveAdminAttendanceDay, submitPunch, updateEmployee, verify, createEmployee, userForLogin,
+  migrateEmployeeUsernames, loginAttempt, recordLoginFailure, issueSession } from '../convex/core.js';
 import { localDateTime, payrollDayTotals, shiftInstant } from '../rules.js';
 
 function fixture() {
-  const tables = Object.fromEntries(['users', 'sessions', 'settings', 'punches', 'extensions', 'overtime', 'audit']
+  const tables = Object.fromEntries(['users', 'sessions', 'settings', 'punches', 'extensions', 'overtime', 'audit', 'loginAttempts']
     .map(name => [name, new Map()]));
   let next = 0;
   const db = {
@@ -35,11 +38,62 @@ function fixture() {
   };
   const ctx = { db };
   const token = 'a'.repeat(64);
-  const addUser = (name, role) => db.insert('users', { name, email: `${name}@example.test`, role, active: true });
+  const addUser = (name, role) => db.insert('users', { name, email: `${name.toLowerCase()}@example.test`, role, active: true });
   const authorize = async adminId => db.insert('sessions', { userId: adminId,
     tokenHash: createHash('sha256').update(token).digest('hex'), expiresAt: Date.now() + 86400000 });
   return { ctx, tables, token, addUser, authorize };
 }
+
+test('employee username login is case-insensitive, rejects phone/email login, and keeps admin email login', async () => {
+  const f = fixture(), adminId = await f.addUser('Admin','admin');
+  await f.authorize(adminId);
+  const salt = 'a'.repeat(32), password = 'password123';
+  const passwordHash = `scrypt$${salt}$${scryptSync(password,salt,64).toString('hex')}`;
+  const profile = { name: 'Juan Dela Cruz', username: ' Juan.Delacruz ', passwordHash,
+    scheduleStart: '08:00', scheduleEnd: '17:00', workdays: [1,2,3,4,5,6], active: true };
+  const result = await createEmployee._handler(f.ctx,{token:f.token,input:profile});
+  assert.equal(result.employee.username,'juan.delacruz');
+  const userId = result.employee.id;
+  await f.ctx.db.patch(userId,{mobile:'09171234567',email:'worker@example.test'});
+  await assert.rejects(createEmployee._handler(f.ctx,{token:f.token,input:profile}),/Username is already in use/);
+  assert.equal((await userForLogin._handler(f.ctx,{identifier:' JUAN.DELACRUZ '}))._id,userId);
+  assert.equal(await userForLogin._handler(f.ctx,{identifier:'09171234567'}),null);
+  assert.equal(await userForLogin._handler(f.ctx,{identifier:'worker@example.test'}),null);
+  assert.equal((await userForLogin._handler(f.ctx,{identifier:'admin@example.test'}))._id,adminId);
+  const handlers = { userForLogin, loginAttempt, recordLoginFailure, issueSession };
+  const dispatch = (reference,args) => handlers[getFunctionName(reference).split(':')[1]]._handler(f.ctx,args);
+  const ctx = {runQuery:dispatch,runMutation:dispatch};
+  const signedIn = await login._handler(ctx,{identifier:' JUAN.DELACRUZ ',password,remember:false});
+  assert.equal(signedIn.user.id,userId);
+  assert.equal(signedIn.user.username,'juan.delacruz');
+  assert.match(signedIn.token,/^[a-f0-9]{64}$/);
+  await assert.rejects(login._handler(ctx,{identifier:'juan.delacruz',password:'incorrect',remember:false}),/Invalid username/);
+  await assert.rejects(login._handler(ctx,{identifier:'09171234567',password,remember:false}),/Invalid username/);
+  await f.ctx.db.patch(userId,{active:false});
+  await assert.rejects(login._handler(ctx,{identifier:'juan.delacruz',password,remember:false}),/Invalid username/);
+});
+
+test('username migration handles duplicate names and keeps existing credentials and records', async () => {
+  const f = fixture();
+  const first = await f.addUser('Juan Dela Cruz','employee'), second = await f.addUser('Juan Dela Cruz','employee');
+  const third = await f.addUser('José Ñ','employee'), adminId = await f.addUser('Admin','admin');
+  await f.ctx.db.patch(first,{mobile:'09171234567',passwordHash:'unchanged-hash'});
+  const already = await f.addUser('Other worker','employee');
+  await f.ctx.db.patch(already,{username:'juan.dela.cruz'});
+  const session = await f.ctx.db.insert('sessions',{userId:first,tokenHash:'unchanged-session'});
+  const punch = await f.ctx.db.insert('punches',{userId:first,timeUtc:'original-punch'});
+  const result = await migrateEmployeeUsernames._handler(f.ctx,{});
+  assert.equal(result.migrated,3);
+  assert.equal((await f.ctx.db.get(first)).username,'juan.dela.cruz.2');
+  assert.equal((await f.ctx.db.get(second)).username,'juan.dela.cruz.3');
+  assert.equal((await f.ctx.db.get(third)).username,'jose.n');
+  assert.equal((await f.ctx.db.get(adminId)).username,undefined);
+  assert.equal((await f.ctx.db.get(first)).passwordHash,'unchanged-hash');
+  assert.equal((await f.ctx.db.get(first)).mobile,'09171234567');
+  assert.ok(await f.ctx.db.get(session));
+  assert.equal((await f.ctx.db.get(punch)).timeUtc,'original-punch');
+  assert.equal((await migrateEmployeeUsernames._handler(f.ctx,{})).migrated,0);
+});
 
 test('admin reviews overtime and night hours independently; rejected proof excludes both', async () => {
   const f = fixture(), date = '2026-10-15';
@@ -305,7 +359,7 @@ test('schedule edits apply immediately from the chosen date, preserve punches, a
   const f = fixture(), date = localDateTime(new Date().toISOString()).date;
   const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
   await f.authorize(adminId);
-  await f.ctx.db.patch(userId, { mobile: '09123456789', scheduleStart: '08:00', scheduleEnd: '17:00', workdays: [1,2,3,4,5,6] });
+  await f.ctx.db.patch(userId, { username: 'worker', scheduleStart: '08:00', scheduleEnd: '17:00', workdays: [1,2,3,4,5,6] });
   const priorDate = new Date(Date.parse(`${date}T00:00:00Z`) - 86400000).toISOString().slice(0,10);
   await backfill._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: priorDate,
     timeIn: '08:00', timeOut: '17:00', reason: 'Prior workday entry' } });
@@ -320,7 +374,7 @@ test('schedule edits apply immediately from the chosen date, preserve punches, a
   const oldKey = extension.calculationKey;
   assert.ok(payrollDayTotals(date, todayPunches, extension).overtime > 0);
   await updateEmployee._handler(f.ctx, { token: f.token, id: userId, input: {
-    name: 'Worker', mobile: '09123456789', scheduleStart: '07:00', scheduleEnd: '16:00',
+    name: 'Worker', username: 'worker', scheduleStart: '07:00', scheduleEnd: '16:00',
     workdays: [1,2,3,4,5,6], active: true, scheduleEffectiveDate: date
   } });
   assert.ok(todayPunches.every(p => p.scheduleStart === '07:00' && p.scheduleEnd === '16:00'));
@@ -345,12 +399,12 @@ test('schedule edits update an open current-day shift without replacing its Time
   const f = fixture(), date = localDateTime(new Date().toISOString()).date;
   const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
   await f.authorize(adminId);
-  await f.ctx.db.patch(userId, { mobile: '09123456789', scheduleStart: '08:00', scheduleEnd: '17:00' });
+  await f.ctx.db.patch(userId, { username: 'worker', scheduleStart: '08:00', scheduleEnd: '17:00' });
   const sessionId = await f.ctx.db.insert('sessions', { userId, tokenHash: 'employee-session', expiresAt: Date.now() + 86400000 });
   const punchId = await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'IN', timeUtc: shiftInstant(date,'07:40'),
     scheduleStart: '08:00', scheduleEnd: '17:00', method: 'ONSITE', selfieId: 'original', verification: 'PENDING', active: true });
   await updateEmployee._handler(f.ctx, { token: f.token, id: userId, input: {
-    name: 'Worker', mobile: '09123456789', scheduleStart: '07:00', scheduleEnd: '16:00', workdays: [1,2,3,4,5,6], active: true
+    name: 'Worker', username: 'worker', scheduleStart: '07:00', scheduleEnd: '16:00', workdays: [1,2,3,4,5,6], active: true
   } });
   assert.equal((await f.ctx.db.get(punchId)).scheduleStart, '07:00');
   assert.equal((await f.ctx.db.get(punchId)).timeUtc, shiftInstant(date,'07:40'));

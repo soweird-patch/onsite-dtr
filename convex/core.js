@@ -4,15 +4,15 @@ import { v } from 'convex/values';
 import { cutoffFor, groupPunches, holidayFor, localDateTime, premiumCalculationKey, shiftInstant, workBreakdownIntervals } from '../rules.js';
 import { audit, authUser, dateRange, dayNow, digest, distanceMeters, localTimeToUtc,
   now, punchView, safeDate, settings, settingsDefault, settingsView, timezone,
-  userView, validateEmployee, validEmail } from './lib.js';
+  userView, validateEmployee, validEmail, normalizeUsername, validUsername } from './lib.js';
 
 const tokenArg = { token: v.string() };
 
 async function userByEmail(ctx, email) {
   return ctx.db.query('users').withIndex('by_email', q => q.eq('email', email)).unique();
 }
-async function userByMobile(ctx, mobile) {
-  return ctx.db.query('users').withIndex('by_mobile', q => q.eq('mobile', mobile)).unique();
+async function userByUsername(ctx, username) {
+  return ctx.db.query('users').withIndex('by_username', q => q.eq('username', username)).unique();
 }
 async function punchFor(ctx, userId, date, slot) {
   const rows = await ctx.db.query('punches').withIndex('by_user_date', q => q.eq('userId', userId).eq('workDate', date)).collect();
@@ -584,8 +584,13 @@ export const reviewExtension = mutation({ args: { ...tokenArg, id: v.string(), s
 });
 
 // Internal functions are callable only by the password and file actions.
-export const userForLogin = internalQuery({ args: { identifier: v.string() }, handler: (ctx, { identifier }) =>
-  /^\d{11}$/.test(identifier) ? userByMobile(ctx, identifier) : userByEmail(ctx, identifier) });
+export const userForLogin = internalQuery({ args: { identifier: v.string() }, handler: async (ctx, { identifier }) => {
+  const normalized = normalizeUsername(identifier);
+  const adminLogin = validEmail(normalized);
+  if (!adminLogin && !validUsername(normalized)) return null;
+  const user = adminLogin ? await userByEmail(ctx, normalized) : await userByUsername(ctx, normalized);
+  return user?.role === (adminLogin ? 'admin' : 'employee') ? user : null;
+} });
 export const userForToken = internalQuery({ args: { token: v.string(), role: v.optional(v.string()) }, handler: (ctx, { token, role }) => authUser(ctx, token, role) });
 export const loginAttempt = internalQuery({ args: { email: v.string() }, handler: (ctx, { email }) => ctx.db.query('loginAttempts').withIndex('by_email', q => q.eq('email', email)).unique() });
 export const recordLoginFailure = internalMutation({ args: { email: v.string() }, handler: async (ctx, { email }) => {
@@ -686,30 +691,50 @@ export const changePassword = internalMutation({ args: { token: v.string(), oldH
 export const createEmployee = internalMutation({ args: { token: v.string(), input: v.any() }, handler: async (ctx, { token, input }) => {
   const admin = await authUser(ctx, token, 'admin');
   validateEmployee(input, true);
-  const mobile = input.mobile.trim();
-  if (await userByMobile(ctx, mobile)) throw new Error('Mobile number is already in use.');
-  const id = await ctx.db.insert('users', { name: input.name.trim(), mobile, passwordHash: input.passwordHash,
+  const username = normalizeUsername(input.username);
+  if (await userByUsername(ctx, username)) throw new Error('Username is already in use.');
+  const id = await ctx.db.insert('users', { name: input.name.trim(), username, passwordHash: input.passwordHash,
     role: 'employee', active: true, scheduleStart: input.scheduleStart, scheduleEnd: input.scheduleEnd,
     workdays: input.workdays, graceMinutes: 0, createdAt: now() });
-  await audit(ctx, admin._id, 'employee_create', 'user', id, { mobile });
+  await audit(ctx, admin._id, 'employee_create', 'user', id, { username });
   return { employee: userView(await ctx.db.get(id)) };
 }});
+
+// Run once with the authenticated deployment CLI when moving existing accounts to usernames.
+export const migrateEmployeeUsernames = internalMutation({ args: {}, handler: async ctx => {
+  const users = await ctx.db.query('users').withIndex('by_role', q => q.eq('role', 'employee')).collect();
+  const occupied = new Set(users.filter(user => user.username).map(user => normalizeUsername(user.username)));
+  let migrated = 0;
+  for (const user of users.filter(user => !user.username)) {
+    let base = user.name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+      .replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '').slice(0, 26).replace(/\.+$/g, '');
+    if (!/^[a-z]/.test(base) || base.length < 3) base = `employee.${base}`.slice(0, 26);
+    let username = base, suffix = 2;
+    while (occupied.has(username) || await userByUsername(ctx, username)) username = `${base}.${suffix++}`;
+    occupied.add(username);
+    await ctx.db.patch(user._id, { username });
+    await audit(ctx, undefined, 'employee_username_migrated', 'user', user._id, { username });
+    migrated++;
+  }
+  return { migrated, alreadyConfigured: users.length - migrated };
+} });
+
 export const updateEmployee = internalMutation({ args: { token: v.string(), id: v.string(), input: v.any() }, handler: async (ctx, { token, id, input }) => {
   const admin = await authUser(ctx, token, 'admin');
   const userId = ctx.db.normalizeId('users', id);
   const old = userId && await ctx.db.get(userId);
   if (!old || old.role !== 'employee') throw new Error('Employee not found.');
   validateEmployee(input, false);
-  const mobile = input.mobile.trim();
-  const other = await userByMobile(ctx, mobile);
-  if (other && other._id !== userId) throw new Error('Mobile number is already in use.');
+  const username = normalizeUsername(input.username);
+  const other = await userByUsername(ctx, username);
+  if (other && other._id !== userId) throw new Error('Username is already in use.');
   const effectiveDate = input.scheduleEffectiveDate || dayNow();
   if (!safeDate(effectiveDate) || effectiveDate > dayNow())
     throw new Error('Schedule effective date must be today or an earlier date.');
   const scheduleChanged = old.scheduleStart !== input.scheduleStart || old.scheduleEnd !== input.scheduleEnd;
-  const credentialsChanged = input.passwordHash || !input.active || old.mobile !== mobile;
+  const credentialsChanged = input.passwordHash || !input.active || old.username !== username;
   const before = userView(old);
-  await ctx.db.patch(userId, { name: input.name.trim(), mobile, email: undefined, scheduleStart: input.scheduleStart,
+  await ctx.db.patch(userId, { name: input.name.trim(), username, email: undefined, scheduleStart: input.scheduleStart,
     scheduleEnd: input.scheduleEnd, workdays: input.workdays, graceMinutes: 0,
     active: !!input.active, isDemo: undefined, ...(input.passwordHash ? { passwordHash: input.passwordHash } : {}) });
   if (scheduleChanged || input.scheduleEffectiveDate) {
@@ -752,13 +777,13 @@ export const deleteEmployee = mutation({ args: { token: v.string(), id: v.string
   }
   for (const extension of extensions) await ctx.db.delete(extension._id);
   for (const entry of overtime) await ctx.db.delete(entry._id);
-  const loginKey = employee.mobile || employee.email;
+  const loginKey = employee.username || employee.mobile || employee.email;
   const attempts = loginKey ? await ctx.db.query('loginAttempts').withIndex('by_email', q => q.eq('email', loginKey)).collect() : [];
   for (const attempt of attempts) await ctx.db.delete(attempt._id);
   if (employee.profileImageId) await ctx.storage.delete(employee.profileImageId);
   await ctx.db.delete(userId);
   await audit(ctx, admin._id, 'employee_delete', 'user', userId, {
-    mobile: employee.mobile, punches: punches.length, extensions: extensions.length, overtime: overtime.length
+    username: employee.username, punches: punches.length, extensions: extensions.length, overtime: overtime.length
   });
   return { ok: true };
 }});

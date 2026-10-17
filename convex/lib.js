@@ -25,7 +25,7 @@ export function settingsView(row) {
 }
 
 export function userView(row) {
-  return { id: row._id, name: row.name, email: row.email ?? null, mobile: row.mobile ?? null, role: row.role,
+  return { id: row._id, name: row.name, email: row.email ?? null, username: row.username ?? null, role: row.role,
     active: row.active, scheduleStart: row.scheduleStart || '08:00', scheduleEnd: row.scheduleEnd || '17:00',
     workdays: row.workdays };
 }
@@ -67,11 +67,14 @@ export function validEmail(email) {
   return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 200;
 }
 
+export const normalizeUsername = value => typeof value === 'string' ? value.trim().toLowerCase() : '';
+export const validUsername = value => /^[a-z][a-z0-9._-]{2,31}$/.test(value);
+
 export function validateEmployee(input, creating) {
   if (typeof input.name !== 'string' || input.name.trim().length < 2 || input.name.length > 120)
     throw new Error('Employee name must have 2–120 characters.');
-  if (typeof input.mobile !== 'string' || !/^\d{11}$/.test(input.mobile))
-    throw new Error('Employee mobile number must contain exactly 11 digits.');
+  if (!validUsername(normalizeUsername(input.username)))
+    throw new Error('Username must have 3–32 characters, start with a letter, and use only letters, numbers, dots, underscores, or hyphens.');
   if (creating && (!input.passwordHash || typeof input.passwordHash !== 'string'))
     throw new Error('Temporary password is required.');
   clockMinutes(input.scheduleStart); clockMinutes(input.scheduleEnd);

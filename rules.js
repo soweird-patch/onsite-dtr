@@ -147,7 +147,15 @@ export function workBreakdownIntervals(date, intervals = [], continuedAtUtc = nu
   const paid = paidIntervals(date, intervals);
   const workedMinutes = Math.floor(paid.reduce((sum, item) => sum + item.end - item.start, 0) / 60000);
   const regularMinutes = Math.min(REQUIRED_REGULAR_MINUTES, workedMinutes);
-  const overtimeMinutes = Math.max(0, workedMinutes - REQUIRED_REGULAR_MINUTES);
+  const overtimeEnd = Date.parse(shiftInstant(date, OVERTIME_END));
+  let regularRemainingMs = REQUIRED_REGULAR_MINUTES * 60000, overtimeMs = 0;
+  for (const item of paid) {
+    const regularMs = Math.min(regularRemainingMs, item.end - item.start);
+    regularRemainingMs -= regularMs;
+    // After eight actual hours, OT can accrue only until 10 PM on the work date.
+    overtimeMs += Math.max(0, Math.min(item.end, overtimeEnd) - (item.start + regularMs));
+  }
+  const overtimeMinutes = Math.floor(overtimeMs / 60000);
   const earlyNightStart = Date.parse(shiftInstant(date, '00:00'));
   const earlyNightEnd = Date.parse(shiftInstant(date, NIGHT_END));
   const nightStart = Date.parse(shiftInstant(date, OVERTIME_END));
@@ -165,7 +173,7 @@ export function workBreakdownIntervals(date, intervals = [], continuedAtUtc = nu
 }
 
 export function premiumCalculationKey(date, punches) {
-  return JSON.stringify(['actual-hours-v1', date, groupPunches(punches).map(group => [
+  return JSON.stringify(['actual-hours-v2-ot22', date, groupPunches(punches).map(group => [
     group.inPunch?.timeUtc || null, group.outPunch?.timeUtc || null,
     group.inPunch?.scheduleStart || REGULAR_START, group.inPunch?.scheduleEnd || REGULAR_END
   ])]);

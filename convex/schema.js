@@ -3,14 +3,15 @@ import { v } from 'convex/values';
 
 export default defineSchema({
   users: defineTable({
-    name: v.string(), email: v.optional(v.string()), mobile: v.optional(v.string()), passwordHash: v.string(),
+    name: v.string(), email: v.optional(v.string()), mobile: v.optional(v.string()),
+    username: v.optional(v.string()), passwordHash: v.string(),
     role: v.union(v.literal('admin'), v.literal('employee')),
     active: v.boolean(), scheduleStart: v.string(), scheduleEnd: v.string(),
     workdays: v.array(v.number()), graceMinutes: v.number(), createdAt: v.string(),
     profileImageId: v.optional(v.id('_storage')),
     // Kept temporarily so existing cloud documents with the former flag remain valid; the app no longer reads or writes it.
     isDemo: v.optional(v.boolean())
-  }).index('by_email', ['email']).index('by_mobile', ['mobile']).index('by_role', ['role']),
+  }).index('by_email', ['email']).index('by_mobile', ['mobile']).index('by_username', ['username']).index('by_role', ['role']),
   sessions: defineTable({
     tokenHash: v.string(), userId: v.id('users'), expiresAt: v.number(), createdAt: v.string()
   }).index('by_hash', ['tokenHash']).index('by_user', ['userId']),

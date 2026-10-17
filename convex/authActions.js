@@ -4,6 +4,7 @@ import { action } from './_generated/server.js';
 import { api, internal } from './_generated/api.js';
 import { v } from 'convex/values';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { validEmail, validUsername } from './lib.js';
 
 function passwordHash(password) {
   const salt = randomBytes(16).toString('hex');
@@ -33,14 +34,14 @@ async function storeProfilePhoto(ctx, image) {
 
 export const login = action({ args: { identifier: v.string(), password: v.string(), remember: v.boolean() }, handler: async (ctx, args) => {
   const identifier = args.identifier.trim().toLowerCase();
-  if (identifier.length > 200 || (!/^\d{11}$/.test(identifier) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier)) || args.password.length > 1024)
-    throw new Error('Invalid email, mobile number, or password.');
+  if (identifier.length > 200 || (!validUsername(identifier) && !validEmail(identifier)) || args.password.length > 1024)
+    throw new Error('Invalid username, admin email, or password.');
   const attempt = await ctx.runQuery(internal.core.loginAttempt, { email: identifier });
   if (attempt && attempt.until > Date.now() && attempt.count >= 5) throw new Error('Too many attempts. Try again later.');
   const user = await ctx.runQuery(internal.core.userForLogin, { identifier });
   if (!user?.active || !passwordMatches(args.password, user.passwordHash)) {
     await ctx.runMutation(internal.core.recordLoginFailure, { email: identifier });
-    throw new Error('Invalid email, mobile number, or password.');
+    throw new Error('Invalid username, admin email, or password.');
   }
   const token = randomBytes(32).toString('hex');
   const tokenHash = createHash('sha256').update(token).digest('hex');

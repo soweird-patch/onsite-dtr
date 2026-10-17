@@ -11,7 +11,7 @@ const password = process.env.CONVEX_TEST_ADMIN_PASSWORD;
 if (!url || !email || !password) throw new Error('Set disposable CONVEX_TEST_URL and admin credentials.');
 
 const client = new ConvexHttpClient(url);
-const admin = await client.action(api.authActions.login, { email, password, remember: false });
+const admin = await client.action(api.authActions.login, { identifier: email, password, remember: false });
 assert.equal(admin.user.role, 'admin');
 const adminSession = await client.query(api.core.session, { token: admin.token });
 assert.equal(adminSession.user.email, email);
@@ -20,14 +20,14 @@ await client.mutation(api.core.updateSettings, { token: admin.token, input: {
 } });
 
 const suffix = Math.random().toString(36).slice(2);
-const workerMobile = `09${String(Math.floor(Math.random() * 1_000_000_000)).padStart(9, '0')}`;
+const workerUsername = `qa.worker.${suffix}`;
 const workerPassword = `Worker-QA-${suffix}-password`;
 const created = await client.action(api.authActions.createEmployee, { token: admin.token, input: {
-  name: 'QA Worker', mobile: workerMobile, password: workerPassword, scheduleStart: '08:00',
+  name: 'QA Worker', username: workerUsername, password: workerPassword, scheduleStart: '08:00',
   scheduleEnd: '17:00', workdays: [1, 2, 3, 4, 5, 6], graceMinutes: 0, active: true
 } });
-assert.equal(created.employee.mobile, workerMobile);
-const worker = await client.action(api.authActions.login, { identifier: workerMobile, password: workerPassword, remember: true });
+assert.equal(created.employee.username, workerUsername);
+const worker = await client.action(api.authActions.login, { identifier: workerUsername, password: workerPassword, remember: true });
 assert.equal(worker.user.role, 'employee');
 await assert.rejects(client.query(api.core.employees, { token: worker.token }), /Not allowed/);
 

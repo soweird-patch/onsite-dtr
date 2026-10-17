@@ -11,7 +11,7 @@ Ang reference UI ay ang ipinadalang dark navy/teal mobile dashboard: greeting sa
 1. **Payroll cutoff:** start/end day ng dalawang period bawat buwan (sample mula sa screenshot: 11–25 at 26–10). Inclusive ang dates; dapat tama rin ang period na tumatawid ng buwan o taon.
 2. **Work schedule:** Standard 8:00 AM–5:00 PM o Custom start/end per employee; excluded ang 12:00–1:00 PM unpaid break, kasama ang configured workdays at Asia/Manila timezone. Time In ay puwede mula 6:00 AM hanggang 4:00 PM. Ang unang 8 actual working hours ay regular; ang sobra ay pending OT kahit bago 5:00 PM. Schedule changes apply immediately from the chosen effective date and reset affected premium reviews. Tingnan ang [regular at premium workflow](PREMIUM_FLOW.md).
 3. **Nag-iisang onsite location:** admin ang magse-set at mag-a-update ng site name/address, GPS pin (latitude/longitude), at allowed radius/geofence. Itatala ang history ng pin/radius changes para hindi maiba ang interpretasyon ng lumang punches.
-4. **Employee accounts:** full name, employee ID, status, role, at assigned schedule. Admin ang gagawa at magdi-disable ng account.
+4. **Employee accounts:** full name, unique username para sa login, employee ID, status, role, at assigned schedule. Admin login uses email. Admin ang gagawa at magdi-disable ng account.
 5. **Verification policy:** sino ang puwedeng mag-approve ng offsite entries at ilang araw bago ma-lock ang cutoff.
 
 ## 3. Employee flow
@@ -89,7 +89,7 @@ Create/edit/disable employee; assign employee ID, schedule, at initial login ins
 | May AM In, wala pang PM Out | Ipakita ang Time Out action; status **Incomplete** hanggang makumpleto. |
 | May parehong punches | Status **Present** kung valid; late/undertime ay hiwalay na minutes. |
 | Time In mula 6:00 AM hanggang 4:00 PM | Flexible arrival; expected Time Out follows 8 actual working hours, excluding unpaid lunch and gaps. |
-| Time Out bago makumpleto ang 8 actual working hours | **Undertime** = 480 minus actual working minutes. Time beyond 8 working hours is pending OT, including before 5:00 PM. |
+| Time Out bago makumpleto ang 8 actual working hours | **Undertime** = 480 minus actual working minutes. Time beyond 8 working hours is pending OT until 10:00 PM, including before 5:00 PM. Night differential stays fixed at 10:00 PM–6:00 AM. |
 | Walang punch matapos ang scheduled shift | **No record / possible absence**, para i-review ng admin. Hindi agad payroll-final kung may leave/holiday/exemption. |
 | Offsite proof | **Pending verification** hanggang approve/reject ng admin. |
 | Admin backfill | **Created by admin**, may required reason; walang selfie requirement. |

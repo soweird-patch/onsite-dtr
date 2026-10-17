@@ -41,6 +41,39 @@ test('7:40 arrival completes eight paid hours at 16:40 and earns ten minutes pen
   });
 });
 
+test('7 AM arrival finishes at 4 PM while a 5 PM exit adds one hour requiring OT approval', () => {
+  const date = '2026-10-15', start = shiftInstant(date,'07:00');
+  assert.equal(expectedTimeOut(date,[{inUtc:start}]),shiftInstant(date,'16:00'));
+  for (const [end, overtime] of [['16:00',0],['17:00',60]]) {
+    const punches = [
+      {slot:'IN',timeUtc:start,scheduleStart:'08:00',scheduleEnd:'17:00',verification:'APPROVED'},
+      {slot:'OUT',timeUtc:shiftInstant(date,end),verification:'APPROVED'}
+    ];
+    assertBreakdown(workBreakdown(date,start,shiftInstant(date,end)),{regularMinutes:480,overtimeCandidateMinutes:overtime,undertimeMinutes:0});
+    const review = {calculationKey:premiumCalculationKey(date,punches),overtimeDecision:'PENDING',nightDecision:'PENDING'};
+    assert.equal(payrollDayTotals(date,punches,review).overtime,0);
+    review.overtimeDecision='APPROVED';
+    assert.equal(payrollDayTotals(date,punches,review).overtime,overtime);
+  }
+});
+
+test('OT stops exactly at 10 PM and night differential keeps its fixed overnight window', () => {
+  const date = '2026-10-15', start = shiftInstant(date,'07:00');
+  for (const [end,nextDay,ot,night] of [
+    ['21:59',false,359,0], ['22:00',false,360,0], ['22:01',false,360,1],
+    ['23:00',false,360,60], ['06:00',true,360,480], ['07:00',true,360,480]
+  ]) {
+    assertBreakdown(workBreakdown(date,start,shiftInstant(date,end,nextDay)), {
+      regularMinutes:480,overtimeCandidateMinutes:ot,nightCandidateMinutes:night
+    });
+  }
+  const split = workBreakdownIntervals(date,[
+    {inUtc:start,outUtc:shiftInstant(date,'16:00')},
+    {inUtc:shiftInstant(date,'21:30'),outUtc:shiftInstant(date,'23:30')}
+  ]);
+  assertBreakdown(split,{regularMinutes:480,overtimeCandidateMinutes:30,nightCandidateMinutes:90});
+});
+
 test('6 AM arrival earns OT before 5 PM; late arrivals must still complete eight hours', () => {
   const date = '2026-10-15';
   assertBreakdown(workBreakdown(date, shiftInstant(date, '06:00'), shiftInstant(date, '15:30')), {
@@ -50,7 +83,7 @@ test('6 AM arrival earns OT before 5 PM; late arrivals must still complete eight
     regularMinutes: 420, overtimeCandidateMinutes: 0, undertimeMinutes: 60
   });
   assertBreakdown(workBreakdown(date, shiftInstant(date, '16:00'), shiftInstant(date, '00:15', true)), {
-    regularMinutes: 480, overtimeCandidateMinutes: 15, nightCandidateMinutes: 135,
+    regularMinutes: 480, overtimeCandidateMinutes: 0, nightCandidateMinutes: 135,
     expectedTimeOutUtc: shiftInstant(date, '00:00', true)
   });
 });
@@ -58,7 +91,7 @@ test('6 AM arrival earns OT before 5 PM; late arrivals must still complete eight
 test('night time is also worked time and is capped at the 6 AM next-day cutoff', () => {
   const date = '2026-10-15';
   assertBreakdown(workBreakdown(date, shiftInstant(date, '08:00'), shiftInstant(date, '07:00', true)), {
-    regularMinutes: 480, overtimeCandidateMinutes: 780, nightCandidateMinutes: 480
+    regularMinutes: 480, overtimeCandidateMinutes: 300, nightCandidateMinutes: 480
   });
   assertBreakdown(workBreakdown(date, shiftInstant(date, '22:00'), shiftInstant(date, '06:00', true)), {
     regularMinutes: 480, overtimeCandidateMinutes: 0, nightCandidateMinutes: 480
@@ -78,7 +111,7 @@ test('split intervals exclude gaps and unpaid lunch only once', () => {
   assertBreakdown(workBreakdownIntervals(date, [
     { inUtc: shiftInstant(date, '08:00'), outUtc: shiftInstant(date, '20:00') },
     { inUtc: shiftInstant(date, '21:00'), outUtc: shiftInstant(date, '23:00') }
-  ]), { regularMinutes: 480, overtimeCandidateMinutes: 300, nightCandidateMinutes: 60 });
+  ]), { regularMinutes: 480, overtimeCandidateMinutes: 240, nightCandidateMinutes: 60 });
 });
 
 test('overlapping intervals cannot double count regular time or night differential', () => {
@@ -86,7 +119,7 @@ test('overlapping intervals cannot double count regular time or night differenti
   assertBreakdown(workBreakdownIntervals(date, [
     { inUtc: shiftInstant(date, '16:00'), outUtc: shiftInstant(date, '23:00') },
     { inUtc: shiftInstant(date, '22:00'), outUtc: shiftInstant(date, '00:30', true) }
-  ]), { regularMinutes: 480, overtimeCandidateMinutes: 30, nightCandidateMinutes: 150 });
+  ]), { regularMinutes: 480, overtimeCandidateMinutes: 0, nightCandidateMinutes: 150 });
 });
 
 test('schedule metadata cannot truncate actual work or create an OT-to-regular approval', () => {
@@ -99,15 +132,15 @@ test('schedule metadata cannot truncate actual work or create an OT-to-regular a
 test('payroll excludes pending and stale premiums and approves night differential independently', () => {
   const date = '2026-10-15';
   const punches = [
-    { slot: 'IN', timeUtc: shiftInstant(date, '16:00'), verification: 'APPROVED' },
-    { slot: 'OUT', timeUtc: shiftInstant(date, '01:00', true), verification: 'APPROVED' }
+    { slot: 'IN', timeUtc: shiftInstant(date, '08:00'), verification: 'APPROVED' },
+    { slot: 'OUT', timeUtc: shiftInstant(date, '23:00'), verification: 'APPROVED' }
   ];
   const extension = { calculationKey: premiumCalculationKey(date, punches), overtimeDecision: 'PENDING', nightDecision: 'PENDING' };
   assert.deepEqual(payrollDayTotals(date, punches, extension), { regular: 480, undertime: 0, overtime: 0, night: 0 });
   extension.nightDecision = 'APPROVED';
-  assert.deepEqual(payrollDayTotals(date, punches, extension), { regular: 480, undertime: 0, overtime: 0, night: 180 });
+  assert.deepEqual(payrollDayTotals(date, punches, extension), { regular: 480, undertime: 0, overtime: 0, night: 60 });
   extension.overtimeDecision = 'APPROVED';
-  assert.equal(payrollDayTotals(date, punches, extension).overtime, 60);
+  assert.equal(payrollDayTotals(date, punches, extension).overtime, 300);
   punches[1].timeUtc = shiftInstant(date, '02:00', true);
   assert.deepEqual(payrollDayTotals(date, punches, extension), { regular: 480, undertime: 0, overtime: 0, night: 0 });
   punches[0].verification = 'PENDING';

@@ -4,11 +4,13 @@ The DTR records hours for payroll review; it does not calculate pay rates or ded
 
 ## Actual working hours
 
+Employees sign in with their **username and password**. Admins set usernames and planned schedules in Employees; admin login uses email. Existing employee accounts receive a unique username based on their name, while passwords and attendance remain intact.
+
 Employees can clock in between **6:00 AM and 4:00 PM**, inclusive. Admins can record exceptional work outside that window.
 
-The first **480 actual working minutes** in the workday are regular time. The company **12:00-1:00 PM unpaid lunch** and gaps between recorded intervals are excluded. Overlapping intervals never count twice. Less than 480 minutes creates undertime; every additional working minute is pending OT, including time before 5:00 PM and time worked overnight. Night differential independently counts actual work from **10:00 PM to 6:00 AM**, including exceptional work before 6:00 AM on the work date. A workday closes no later than 6:00 AM the next day.
+The first **480 actual working minutes** in the workday are regular time. The company **12:00-1:00 PM unpaid lunch** and gaps between recorded intervals are excluded. Overlapping intervals never count twice. Less than 480 minutes creates undertime; additional working minutes **up to 10:00 PM** are pending OT, including time before 5:00 PM. OT stops at 10:00 PM; later time is not added to OT. Night differential independently counts actual work from **10:00 PM to 6:00 AM**, including exceptional work before 6:00 AM on the work date. A workday closes no later than 6:00 AM the next day.
 
-For example, 7:40 AM to 4:50 PM, excluding lunch, gives **8 regular hours and 10 minutes pending OT**. Expected Time Out is **4:40 PM**. A 4:00 PM arrival with no further breaks completes eight hours at midnight. Expected Time Out accounts for completed intervals and projects the rest assuming no further unpaid gaps.
+For example, 7:40 AM to 4:50 PM, excluding lunch, gives **8 regular hours and 10 minutes pending OT**. Expected Time Out is **4:40 PM**. A 7:00 AM arrival completes at 4:00 PM after lunch; staying to 5:00 PM creates one hour of pending OT. A 4:00 PM arrival with no further breaks completes eight hours at midnight. Expected Time Out accounts for completed intervals and projects the rest assuming no further unpaid gaps.
 
 ## Schedule and attendance edits
 
