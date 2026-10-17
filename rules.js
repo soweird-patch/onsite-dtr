@@ -103,22 +103,29 @@ function paidIntervals(date, intervals) {
   ].filter(item => item.end > item.start));
 }
 
+function regularEligibleIntervals(date, intervals) {
+  const start = Date.parse(shiftInstant(date, NIGHT_END));
+  const end = Date.parse(shiftInstant(date, OVERTIME_END));
+  return paidIntervals(date, intervals).map(item => ({ start: Math.max(start, item.start), end: Math.min(end, item.end) }))
+    .filter(item => item.end > item.start);
+}
+
 export function expectedTimeOut(date, intervals = []) {
   let remaining = REQUIRED_REGULAR_MINUTES * 60000;
-  for (const item of paidIntervals(date, intervals)) {
+  for (const item of regularEligibleIntervals(date, intervals)) {
     if (item.end - item.start >= remaining) return new Date(item.start + remaining).toISOString();
     remaining -= item.end - item.start;
   }
   const last = intervals.filter(item => Number.isFinite(Date.parse(item.inUtc)) &&
     (!item.outUtc || Number.isFinite(Date.parse(item.outUtc)))).at(-1);
   if (!last) return null;
-  let start = Date.parse(last.outUtc || last.inUtc);
+  let start = Math.max(Date.parse(last.outUtc || last.inUtc), Date.parse(shiftInstant(date, NIGHT_END)));
   const lunchStart = Date.parse(shiftInstant(date, BREAK_START));
   const lunchEnd = Date.parse(shiftInstant(date, BREAK_END));
   if (start >= lunchStart && start < lunchEnd) start = lunchEnd;
   let end = start + remaining;
   if (start < lunchStart && end > lunchStart) end += lunchEnd - lunchStart;
-  return new Date(end).toISOString();
+  return end <= Date.parse(shiftInstant(date, OVERTIME_END)) ? new Date(end).toISOString() : null;
 }
 
 export function workBreakdown(date, inUtc, outUtc, continuedAtUtc = null,
@@ -146,14 +153,16 @@ export function workBreakdownIntervals(date, intervals = [], continuedAtUtc = nu
   scheduleStart = REGULAR_START, scheduleEnd = REGULAR_END) {
   const paid = paidIntervals(date, intervals);
   const workedMinutes = Math.floor(paid.reduce((sum, item) => sum + item.end - item.start, 0) / 60000);
-  const regularMinutes = Math.min(REQUIRED_REGULAR_MINUTES, workedMinutes);
-  const overtimeEnd = Date.parse(shiftInstant(date, OVERTIME_END));
+  const eligible = regularEligibleIntervals(date, intervals);
+  const eligibleMinutes = Math.floor(eligible.reduce((sum, item) => sum + item.end - item.start, 0) / 60000);
+  const regularMinutes = Math.min(REQUIRED_REGULAR_MINUTES, eligibleMinutes);
   let regularRemainingMs = REQUIRED_REGULAR_MINUTES * 60000, overtimeMs = 0;
-  for (const item of paid) {
+  for (const item of eligible) {
     const regularMs = Math.min(regularRemainingMs, item.end - item.start);
     regularRemainingMs -= regularMs;
-    // After eight actual hours, OT can accrue only until 10 PM on the work date.
-    overtimeMs += Math.max(0, Math.min(item.end, overtimeEnd) - (item.start + regularMs));
+    // A later daytime interval fills the regular shortage before earning OT.
+    // Night-window work is classified separately and cannot fill that shortage.
+    overtimeMs += item.end - item.start - regularMs;
   }
   const overtimeMinutes = Math.floor(overtimeMs / 60000);
   const earlyNightStart = Date.parse(shiftInstant(date, '00:00'));
@@ -172,8 +181,28 @@ export function workBreakdownIntervals(date, intervals = [], continuedAtUtc = nu
     expectedTimeOutUtc: expectedTimeOut(date, intervals) };
 }
 
+// Describe each interval's contribution using the same merged day calculation.
+// Prefix differences prevent overlaps or unpaid gaps from earning duplicate time.
+export function workIntervalBreakdowns(date, intervals = []) {
+  const output = new Array(intervals.length), prefix = [];
+  let before = workBreakdownIntervals(date, []);
+  for (const { item, index } of intervals.map((item, index) => ({ item, index }))
+    .sort((a, b) => (Date.parse(a.item.inUtc) || 0) - (Date.parse(b.item.inUtc) || 0))) {
+    prefix.push(item);
+    const after = workBreakdownIntervals(date, prefix);
+    const regularMinutes = after.regularMinutes - before.regularMinutes;
+    output[index] = { number: item.number || index + 1, regularMinutes,
+      regularTopUpMinutes: index > 0 ? regularMinutes : 0,
+      overtimeCandidateMinutes: after.overtimeCandidateMinutes - before.overtimeCandidateMinutes,
+      nightCandidateMinutes: after.nightCandidateMinutes - before.nightCandidateMinutes,
+      shortageAfterMinutes: after.shortageMinutes };
+    before = after;
+  }
+  return output;
+}
+
 export function premiumCalculationKey(date, punches) {
-  return JSON.stringify(['actual-hours-v2-ot22', date, groupPunches(punches).map(group => [
+  return JSON.stringify(['actual-hours-v3-night-only', date, groupPunches(punches).map(group => [
     group.inPunch?.timeUtc || null, group.outPunch?.timeUtc || null,
     group.inPunch?.scheduleStart || REGULAR_START, group.inPunch?.scheduleEnd || REGULAR_END
   ])]);

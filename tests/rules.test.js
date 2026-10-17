@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { cutoffFor, distanceMeters, attendanceMinutes, isPayrollDayReady, isPayrollReady,
-  expectedTimeOut, payrollDayTotals, premiumCalculationKey, workBreakdown, workBreakdownIntervals, shiftInstant } from '../rules.js';
+  expectedTimeOut, payrollDayTotals, premiumCalculationKey, workBreakdown, workBreakdownIntervals, workIntervalBreakdowns, shiftInstant } from '../rules.js';
 
 function assertBreakdown(actual, expected) {
   for (const [key, value] of Object.entries(expected)) assert.equal(actual[key], value, key);
@@ -83,18 +83,19 @@ test('6 AM arrival earns OT before 5 PM; late arrivals must still complete eight
     regularMinutes: 420, overtimeCandidateMinutes: 0, undertimeMinutes: 60
   });
   assertBreakdown(workBreakdown(date, shiftInstant(date, '16:00'), shiftInstant(date, '00:15', true)), {
-    regularMinutes: 480, overtimeCandidateMinutes: 0, nightCandidateMinutes: 135,
-    expectedTimeOutUtc: shiftInstant(date, '00:00', true)
+    regularMinutes: 360, undertimeMinutes: 120, overtimeCandidateMinutes: 0, nightCandidateMinutes: 135,
+    expectedTimeOutUtc: null
   });
 });
 
-test('night time is also worked time and is capped at the 6 AM next-day cutoff', () => {
+test('night time is recorded exclusively as differential and capped at 6 AM', () => {
   const date = '2026-10-15';
   assertBreakdown(workBreakdown(date, shiftInstant(date, '08:00'), shiftInstant(date, '07:00', true)), {
     regularMinutes: 480, overtimeCandidateMinutes: 300, nightCandidateMinutes: 480
   });
   assertBreakdown(workBreakdown(date, shiftInstant(date, '22:00'), shiftInstant(date, '06:00', true)), {
-    regularMinutes: 480, overtimeCandidateMinutes: 0, nightCandidateMinutes: 480
+    regularMinutes: 0, undertimeMinutes: 480, overtimeCandidateMinutes: 0, nightCandidateMinutes: 480,
+    expectedTimeOutUtc: null
   });
 });
 
@@ -119,7 +120,53 @@ test('overlapping intervals cannot double count regular time or night differenti
   assertBreakdown(workBreakdownIntervals(date, [
     { inUtc: shiftInstant(date, '16:00'), outUtc: shiftInstant(date, '23:00') },
     { inUtc: shiftInstant(date, '22:00'), outUtc: shiftInstant(date, '00:30', true) }
-  ]), { regularMinutes: 480, overtimeCandidateMinutes: 0, nightCandidateMinutes: 150 });
+  ]), { regularMinutes: 360, undertimeMinutes: 120, overtimeCandidateMinutes: 0, nightCandidateMinutes: 150 });
+});
+
+test('second interval fills the eight-hour shortage before OT; a third night interval earns ND only', () => {
+  const date = '2026-10-15';
+  const intervals = [
+    {inUtc:shiftInstant(date,'08:00'),outUtc:shiftInstant(date,'15:00')},
+    {inUtc:shiftInstant(date,'17:00'),outUtc:shiftInstant(date,'20:00')},
+    {inUtc:shiftInstant(date,'22:00'),outUtc:shiftInstant(date,'00:00',true)}
+  ];
+  assertBreakdown(workBreakdownIntervals(date,intervals), {
+    regularMinutes:480,shortageMinutes:0,overtimeCandidateMinutes:60,nightCandidateMinutes:120,
+    expectedTimeOutUtc:shiftInstant(date,'19:00')
+  });
+  const parts = workIntervalBreakdowns(date,intervals);
+  assert.deepEqual(parts.map(p=>[p.regularMinutes,p.regularTopUpMinutes,p.overtimeCandidateMinutes,p.nightCandidateMinutes,p.shortageAfterMinutes]),[
+    [360,0,0,0,120],[120,120,60,0,0],[0,0,0,120,0]
+  ]);
+  assert.equal(expectedTimeOut(date,[intervals[0],{inUtc:shiftInstant(date,'17:00')}]),shiftInstant(date,'19:00'));
+});
+
+test('night-only intervals never fill an unfinished regular day or increase OT', () => {
+  const date = '2026-10-15';
+  const intervals = [
+    {inUtc:shiftInstant(date,'08:00'),outUtc:shiftInstant(date,'15:00')},
+    {inUtc:shiftInstant(date,'22:00'),outUtc:shiftInstant(date,'02:00',true)}
+  ];
+  assertBreakdown(workBreakdownIntervals(date,intervals), {
+    regularMinutes:360,shortageMinutes:120,overtimeCandidateMinutes:0,nightCandidateMinutes:240
+  });
+  assert.deepEqual(workIntervalBreakdowns(date,intervals)[1], {
+    number:2,regularMinutes:0,regularTopUpMinutes:0,overtimeCandidateMinutes:0,nightCandidateMinutes:240,shortageAfterMinutes:120
+  });
+});
+
+test('an interval crossing 10 PM splits into regular top-up, OT, and ND without overlap', () => {
+  const date = '2026-10-15';
+  const intervals = [
+    {inUtc:shiftInstant(date,'08:00'),outUtc:shiftInstant(date,'16:00')},
+    {inUtc:shiftInstant(date,'20:00'),outUtc:shiftInstant(date,'01:00',true)}
+  ];
+  assertBreakdown(workBreakdownIntervals(date,intervals),{
+    regularMinutes:480,overtimeCandidateMinutes:60,nightCandidateMinutes:180
+  });
+  assert.deepEqual(workIntervalBreakdowns(date,intervals)[1],{
+    number:2,regularMinutes:60,regularTopUpMinutes:60,overtimeCandidateMinutes:60,nightCandidateMinutes:180,shortageAfterMinutes:0
+  });
 });
 
 test('schedule metadata cannot truncate actual work or create an OT-to-regular approval', () => {

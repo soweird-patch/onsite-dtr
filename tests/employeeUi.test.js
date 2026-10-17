@@ -17,3 +17,20 @@ test('employee editor uses username login and retains editable planned working h
   for (const username of ['juan.delacruz','Juan_Dela-Cruz','worker123']) assert.ok(pattern.test(username));
   for (const username of ['09171234567','x','bad user','bad@email.test']) assert.ok(!pattern.test(username));
 });
+
+test('admin interval editor shows regular top-up, OT, and night-only allocations', () => {
+  const app=appHarness();
+  app.state.session={today:'2026-10-15'};
+  app.state.backfillDraft={employeeId:'worker',workDate:'2026-10-15',expectedIds:[],punches:[],segments:[
+    {timeIn:'08:00',timeOut:'15:00',reason:'First assignment'},
+    {timeIn:'17:00',timeOut:'20:00',reason:'Second assignment'},
+    {timeIn:'22:00',timeOut:'00:00',timeOutNextDay:true,reason:'Night assignment'}
+  ]};
+  const html=app.renderBackfill();
+  assert.equal((html.match(/data-interval-hours=/g)||[]).length,3);
+  assert.ok(html.includes('Fills regular shortage</span><strong>2h 00m'));
+  assert.ok(html.includes('Pending OT</span><strong>1h 00m'));
+  assert.ok(html.includes('Night differential</span><strong>2h 00m'));
+  app.state.backfillDraft.workDate='';
+  assert.doesNotThrow(()=>app.renderBackfill());
+});

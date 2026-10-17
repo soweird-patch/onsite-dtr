@@ -65,3 +65,21 @@ test('actual report totals use current approvals and exclude old manual OT grant
   app.state.adminData.extensions = [];
   assert.equal(app.reportRows()[0].totals.overtime,0);
 });
+
+test('payroll report totals include regular top-up and approved premiums without crediting night to regular', () => {
+  const app=appHarness(), date='2026-10-01', fixture=reportFixture(1,3);
+  const punches=fixture.rows[0].punches;
+  for(const punch of punches){
+    const times={1:['08:00','15:00'],2:['17:00','20:00'],3:['22:00','00:00']}[punch.segment];
+    punch.timeUtc=shiftInstant(date,times[punch.slot==='IN'?0:1],punch.segment===3&&punch.slot==='OUT');
+  }
+  const extension={userId:'worker',workDate:date,calculationKey:premiumCalculationKey(date,punches),overtimeDecision:'APPROVED',nightDecision:'APPROVED'};
+  Object.assign(app.state,{employees:[fixture.employee],reportRange:{start:date,end:date},
+    session:{today:date,user:{role:'admin'},settings:{holidays:[]}},adminData:{punches,extensions:[extension],overtime:[]}});
+  let totals=app.reportRows()[0].totals;
+  assert.deepEqual([totals.regular,totals.undertime,totals.overtime,totals.night],[480,0,60,120]);
+  app.state.adminData.punches= punches.filter(p=>p.segment!==2);
+  extension.calculationKey=premiumCalculationKey(date,app.state.adminData.punches);
+  totals=app.reportRows()[0].totals;
+  assert.deepEqual([totals.regular,totals.undertime,totals.overtime,totals.night],[360,120,0,120]);
+});

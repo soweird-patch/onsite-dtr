@@ -442,6 +442,38 @@ test('each admin interval has independent details; metadata edits preserve proof
   assert.ok([...f.tables.audit.values()].some(a => a.action === 'interval_details_update' && a.details.before.fieldAssignment === 'Client A - Kawit'));
 });
 
+test('admin interval saving and review allocate regular shortfall, remaining OT, and night-only work consistently', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin','admin'), userId = await f.addUser('Worker','employee');
+  await f.authorize(adminId);
+  const segments = [
+    {timeIn:'08:00',timeOut:'15:00',reason:'First daytime assignment'},
+    {timeIn:'17:00',timeOut:'20:00',reason:'Returned for equipment repair'},
+    {timeIn:'22:00',timeOut:'00:00',timeOutNextDay:true,reason:'Night equipment monitoring'}
+  ];
+  await saveAdminAttendanceDay._handler(f.ctx,{token:f.token,input:{employeeId:userId,workDate:date,expectedIds:[],segments}});
+  const active = [...f.tables.punches.values()].filter(p=>p.active);
+  const extension = [...f.tables.extensions.values()][0];
+  assert.deepEqual(payrollDayTotals(date,active,extension),{regular:480,undertime:0,overtime:0,night:0});
+  for(const stage of ['OVERTIME','NIGHT']) await reviewExtension._handler(f.ctx,{
+    token:f.token,id:extension._id,stage,decision:'APPROVED',calculationKey:extension.calculationKey
+  });
+  assert.deepEqual(payrollDayTotals(date,active,extension),{regular:480,undertime:0,overtime:60,night:120});
+  const revised = segments.map((segment,index)=>({...segment,
+    inId:active.find(p=>p.segment===index+1&&p.slot==='IN')._id,
+    outId:active.find(p=>p.segment===index+1&&p.slot==='OUT')._id
+  }));
+  revised[0].timeOut='14:00';
+  await saveAdminAttendanceDay._handler(f.ctx,{token:f.token,input:{employeeId:userId,workDate:date,
+    expectedIds:active.map(p=>p._id),segments:revised}});
+  assert.equal(extension.overtimeDecision,'PENDING');
+  assert.equal(extension.nightDecision,'PENDING');
+  const current = [...f.tables.punches.values()].filter(p=>p.active);
+  await assert.rejects(reviewExtension._handler(f.ctx,{token:f.token,id:extension._id,stage:'OVERTIME',decision:'APPROVED'}),/No remaining overtime/);
+  await reviewExtension._handler(f.ctx,{token:f.token,id:extension._id,stage:'NIGHT',decision:'APPROVED'});
+  assert.deepEqual(payrollDayTotals(date,current,extension),{regular:480,undertime:0,overtime:0,night:120});
+});
+
 test('employee clock-in enforces the 6 AM to 4 PM window, including both boundaries', async () => {
   const f = fixture(), date = '2026-10-15', userId = await f.addUser('Worker','employee');
   await f.authorize(userId);
