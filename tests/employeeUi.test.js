@@ -16,7 +16,7 @@ test('employee editor uses username login and retains editable planned working h
   assert.ok(!html.includes('name="mobile"'));
   assert.ok(html.includes('name="scheduleStart" type="time" value="07:00"'));
   assert.ok(html.includes('name="scheduleEnd" type="time" value="16:00"'));
-  assert.ok(html.includes('1 hour of pending OT for admin approval'));
+  assert.ok(!app.renderEmployeeForm().includes('The admin sets the planned schedule.'));
   const pattern = new RegExp(`^(?:${html.match(/name="username"[^>]*pattern="([^"]+)"/)[1]})$`,'v');
   for (const username of ['juan.delacruz','Juan_Dela-Cruz','worker123']) assert.ok(pattern.test(username));
   for (const username of ['09171234567','x','bad user','bad@email.test']) assert.ok(!pattern.test(username));
