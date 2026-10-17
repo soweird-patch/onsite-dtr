@@ -38,10 +38,10 @@ test('editor, employee history, and review keep ten minutes undertime while addi
   assert.ok(editor.includes('Regular shortage after this interval: 0h 10m'));
   const history=app.employeeAttendanceDayCardSegments(date,punches);
   assert.ok(history.includes('Undertime</span><strong>0h 10m'));
-  assert.ok(history.includes('OT incl. ND</span><strong>2h 00m'));
+  assert.ok(history.includes('Overtime</span><strong>2h 00m'));
   const queue=app.renderPremiumQueue();
   assert.ok(queue.includes('Remaining shortage</span><strong>0h 10m'));
-  assert.ok(queue.includes('OT total incl. ND</span><strong>2h 00m'));
+  assert.ok(queue.includes('Overtime</span><strong>2h 00m'));
   assert.ok(queue.includes('Approve Night differential'));
   assert.ok(!queue.includes('Approve remaining OT'));
 });

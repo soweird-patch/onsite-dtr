@@ -156,10 +156,10 @@ test('PDF OT includes approved ND with ten minutes undertime and excludes pendin
   assert.deepEqual([report.totals.regular,report.totals.undertime,report.totals.overtime,report.totals.night,report.totals.pendingOvertime,report.totals.pendingNight],
     [470,10,120,120,0,0]);
   const html=app.renderReportEmployee(report,{start:date,end:date},'QA',true);
-  assert.ok(html.includes('Approved OT incl. ND</span><strong>2h 00m'));
+  assert.ok(html.includes('Approved Overtime</span><strong>2h 00m'));
   assert.ok(html.includes('Undertime</span><strong>0h 10m'));
   assert.ok(html.includes('The ND column is included in OT total. ND never reduces undertime.'));
-  assert.ok(html.includes('<th>OT incl. ND</th>'));
+  assert.ok(html.includes('<th>Overtime</th>'));
   extension.nightDecision='REJECTED';
   assert.equal(app.reportRows()[0].totals.overtime,0);
   extension.nightDecision='APPROVED';
