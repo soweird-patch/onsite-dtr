@@ -226,6 +226,13 @@ function numericDate(date) {
   if (!date) return '';
   return `${new Intl.DateTimeFormat('en-PH', { month: '2-digit', day: '2-digit', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`))} ${weekdayLabel(date)}`;
 }
+function reportDate(date) {
+  if (!date) return '';
+  const value = new Date(`${date}T00:00:00Z`);
+  const day = new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: 'UTC' }).format(value);
+  const label = new Intl.DateTimeFormat('en-PH', { month: '2-digit', day: '2-digit', year: 'numeric', timeZone: 'UTC' }).format(value);
+  return `${day} ${label}`;
+}
 function incomingHolidays(limit = 4) {
   const dates = new Map((config()?.legalHolidays || []).filter(item => item.type === 'Special working').map(item => [item.date, item]));
   for (const holiday of config()?.holidays || []) dates.set(holiday.date, holiday);
@@ -888,16 +895,16 @@ function reportRows() {
 }
 function renderReportHeader(range, generated, className = '') {
   return `<div class="${className}"><div class="report-head"><div class="report-brand"><img src="${h(state.branding.logo512Url || '/aoda-report-logo.jpg')}" alt="Philippine AODA Power Corp. logo"><div class="report-company"><h2>PHILIPPINE AODA POWER CORP.</h2><p>PCCCII BLDG., MOONSTONE AVE., GRAND CENTENNIAL HOMES,<br>KAWIT 4104, CAVITE, PHILIPPINES</p></div></div></div>
-    <div class="report-meta"><div><strong>EMPLOYEE ATTENDANCE SUMMARY</strong><p>${h(state.branding.appName)} · Cutoff: ${h(numericDate(range.start))} – ${h(numericDate(range.end))} · Asia/Manila</p></div><small>Generated: ${h(generated)}</small></div></div>`;
+    <div class="report-meta"><div><strong>EMPLOYEE ATTENDANCE SUMMARY</strong><p>${h(state.branding.appName)} · Cutoff: ${h(reportDate(range.start))} – ${h(reportDate(range.end))} · Asia/Manila</p></div><small>Generated: ${h(generated)}</small></div></div>`;
 }
 function renderReportEmployee({ employee, rows, totals }, range, generated, visible = false) {
   const details = attendanceDetails(rows);
   const detailTable = details.length ? `<h3 class="report-details-title">Reasons and Field Assignments</h3>
     <div class="table-wrap report-details-wrap"><table class="table report-details"><thead><tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Reason</th><th>Field Assignment</th></tr></thead><tbody>${details.map(item => `<tr>
-      <td data-label="Date">${h(numericDate(item.date))}</td><td data-label="Time In">${h(formatShiftTime(item.inUtc, item.date))}</td>
+      <td data-label="Date">${h(reportDate(item.date))}</td><td data-label="Time In">${h(formatShiftTime(item.inUtc, item.date))}</td>
       <td data-label="Time Out">${h(formatShiftTime(item.outUtc, item.date))}</td><td data-label="Reason">${h(item.reason || '—')}</td>
       <td data-label="Field Assignment">${h(item.fieldAssignment || '—')}</td></tr>`).join('')}</tbody></table></div>` : '';
-  const body = rows.map(row => `<tr><td data-label="Date">${h(numericDate(row.date))}</td>
+  const body = rows.map(row => `<tr><td data-label="Date">${h(reportDate(row.date))}</td>
     <td data-label="Time In">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatShiftTime(group.inPunch?.timeUtc, row.date))}</div>`).join('') || '—'}</td>
     <td data-label="Time Out">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatShiftTime(group.outPunch?.timeUtc, row.date))}</div>`).join('') || '—'}</td>
     <td data-label="Source">${h([...new Set(row.punches.map(punchSource))].join(' / ') || '—')}</td>
