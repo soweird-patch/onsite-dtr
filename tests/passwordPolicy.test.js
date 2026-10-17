@@ -33,4 +33,6 @@ test('employee accounts require an exact 11-digit mobile login', () => {
   assert.doesNotThrow(() => validateEmployee(input, true));
   assert.throws(() => validateEmployee({ ...input, mobile: '0917123456' }, true), /exactly 11 digits/);
   assert.throws(() => validateEmployee({ ...input, mobile: '09171ABC567' }, true), /exactly 11 digits/);
+  assert.doesNotThrow(() => validateEmployee({ ...input, scheduleStart: '10:00', scheduleEnd: '16:00' }, true));
+  assert.throws(() => validateEmployee({ ...input, scheduleStart: '16:00', scheduleEnd: '10:00' }, true), /after the start/);
 });

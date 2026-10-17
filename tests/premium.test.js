@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { approveAttendanceDay, autoTimeOut, backfill, continueOffsite, reviewExtension,
+import { approveAttendanceDay, autoTimeOut, backfill, continueOffsite, reviewExtension, syncAutomaticPremiums,
   saveAdminAttendanceDay, verify } from '../convex/core.js';
 import { shiftInstant } from '../rules.js';
 
@@ -82,6 +82,84 @@ test('admin approves Time In and Time Out together for daily payroll', async () 
     timeUtc: shiftInstant(nextDate, '08:00'), verification: 'PENDING', active: true });
   await assert.rejects(approveAttendanceDay._handler(f.ctx,
     { token: f.token, userId, workDate: nextDate }), /Both Time In and Time Out/);
+});
+
+test('approving a completed day automatically creates the overtime review after 5 PM', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'IN', method: 'ONSITE',
+    timeUtc: shiftInstant(date, '09:00'), verification: 'PENDING', active: true });
+  await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'OUT', method: 'ONSITE',
+    timeUtc: shiftInstant(date, '18:00'), verification: 'PENDING', active: true });
+  await approveAttendanceDay._handler(f.ctx, { token: f.token, userId, workDate: date });
+  const extension = [...f.tables.extensions.values()][0];
+  assert.equal(extension.source, 'AUTO');
+  assert.equal(extension.overtimeDecision, 'PENDING');
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id,
+    stage: 'ADJUSTMENT', decision: 'APPROVED' });
+  assert.equal(extension.adjustmentDecision, 'APPROVED');
+});
+
+test('admin-entered onsite work after 5 PM also receives an automatic OT review', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  await backfill._handler(f.ctx, { token: f.token, input: { employeeId: userId, workDate: date,
+    timeIn: '08:00', timeOut: '17:30', offsite: false, reason: 'Approved onsite extension' } });
+  const extension = [...f.tables.extensions.values()][0];
+  assert.equal(extension.source, 'ADMIN');
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id,
+    stage: 'OVERTIME', decision: 'APPROVED' });
+  assert.equal(extension.overtimeDecision, 'APPROVED');
+});
+
+test('regular adjustment and remaining overtime have independent approvals', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'IN', method: 'ONSITE',
+    timeUtc: shiftInstant(date, '09:00'), verification: 'PENDING', active: true });
+  await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'OUT', method: 'ONSITE',
+    timeUtc: shiftInstant(date, '22:00'), verification: 'PENDING', active: true });
+  await approveAttendanceDay._handler(f.ctx, { token: f.token, userId, workDate: date });
+  const extension = [...f.tables.extensions.values()][0];
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id,
+    stage: 'ADJUSTMENT', decision: 'APPROVED' });
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id,
+    stage: 'OVERTIME', decision: 'REJECTED' });
+  assert.equal(extension.adjustmentDecision, 'APPROVED');
+  assert.equal(extension.overtimeDecision, 'REJECTED');
+});
+
+test('admin time-only attendance snapshots the latest schedule without requiring a photo', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.ctx.db.patch(userId, { scheduleStart: '10:00', scheduleEnd: '19:00' });
+  await f.authorize(adminId);
+  await saveAdminAttendanceDay._handler(f.ctx, { token: f.token, input: {
+    employeeId: userId, workDate: date, reason: 'Manual time-only correction', expectedIds: [],
+    segments: [{ timeIn: '10:00', timeOut: '19:00', timeInNextDay: false,
+      timeOutNextDay: false, inId: null, outId: null, offsite: false }]
+  } });
+  const punches = [...f.tables.punches.values()];
+  assert.equal(punches.length, 2);
+  assert.ok(punches.every(punch => punch.scheduleStart === '10:00' && punch.scheduleEnd === '19:00'));
+  assert.ok(punches.every(punch => !punch.selfieId));
+});
+
+test('existing attendance after 5 PM is synchronized into the OT queue once', async () => {
+  const f = fixture(), date = '2026-10-15';
+  const adminId = await f.addUser('Admin', 'admin'), userId = await f.addUser('Worker', 'employee');
+  await f.authorize(adminId);
+  await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'IN', method: 'ONSITE',
+    timeUtc: shiftInstant(date, '08:00'), verification: 'APPROVED', active: true });
+  await f.ctx.db.insert('punches', { userId, workDate: date, slot: 'OUT', method: 'ONSITE',
+    timeUtc: shiftInstant(date, '18:00'), verification: 'APPROVED', active: true });
+  const first = await syncAutomaticPremiums._handler(f.ctx, { token: f.token, from: date, to: date });
+  const second = await syncAutomaticPremiums._handler(f.ctx, { token: f.token, from: date, to: date });
+  assert.deepEqual({ first: first.created, second: second.created, total: f.tables.extensions.size },
+    { first: 1, second: 0, total: 1 });
 });
 
 test('admin-created offsite shift generates reviewable extra hours and next-day cutoff', async () => {

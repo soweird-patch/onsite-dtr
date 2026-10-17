@@ -89,6 +89,8 @@ async function api(path, options = {}) {
     if (route === '/api/admin/attendance') return options.method === 'POST'
       ? await client.mutation(functions.core.backfill, { token: accessToken, input })
       : await client.query(functions.core.adminAttendance, { token: accessToken, from, to, employeeId: parsed.searchParams.get('employeeId') || undefined });
+    if (route === '/api/admin/extensions/sync') return await client.mutation(functions.core.syncAutomaticPremiums,
+      { token: accessToken, from: input.from, to: input.to });
     if (route === '/api/admin/attendance/day') return await client.mutation(functions.core.saveAdminAttendanceDay,
       { token: accessToken, input });
     if (route === '/api/admin/audit') return await client.query(functions.core.auditItems, { token: accessToken });
@@ -290,21 +292,25 @@ function activeExtension() {
   return state.employeeData.openShift?.extension ||
     state.employeeData.extensions.find(item => item.workDate === activeWorkDate());
 }
-function premiumBreakdown(date, inPunch, outPunch, extension) {
-  return workBreakdown(date, inPunch?.timeUtc, outPunch?.timeUtc, extension?.continuedAt);
+function premiumBreakdown(date, inPunch, outPunch, extension, employee = state.session?.user) {
+  return workBreakdown(date, inPunch?.timeUtc, outPunch?.timeUtc, extension?.continuedAt,
+    inPunch ? (inPunch.scheduleStart || '08:00') : (employee?.scheduleStart || '08:00'),
+    inPunch ? (inPunch.scheduleEnd || '17:00') : (employee?.scheduleEnd || '17:00'));
 }
-function dayBreakdown(date, punches, extension) {
+function dayBreakdown(date, punches, extension, employee = state.session?.user) {
+  const schedulePunch = groupPunches(punches).find(group => group.inPunch)?.inPunch;
   return workBreakdownIntervals(date, groupPunches(punches).map(group => ({
     inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc
-  })), extension?.continuedAt);
+  })), extension?.continuedAt, schedulePunch ? (schedulePunch.scheduleStart || '08:00') : (employee?.scheduleStart || '08:00'),
+    schedulePunch ? (schedulePunch.scheduleEnd || '17:00') : (employee?.scheduleEnd || '17:00'));
 }
 function intervalText(punches, date, slot) {
   return groupPunches(punches).map(group => formatShiftTime(group[slot === 'IN' ? 'inPunch' : 'outPunch']?.timeUtc, date)).join(' / ');
 }
 function runningBreakdown(date, inPunch, outPunch, extension) {
-  if (outPunch || !extension || !inPunch) return premiumBreakdown(date, inPunch, outPunch, extension);
+  if (outPunch || !inPunch) return premiumBreakdown(date, inPunch, outPunch, extension);
   const estimate = new Date(Math.min(Date.now(), Date.parse(shiftInstant(date, '06:00', true)))).toISOString();
-  return workBreakdown(date, inPunch.timeUtc, estimate, extension.continuedAt);
+  return workBreakdown(date, inPunch.timeUtc, estimate, extension?.continuedAt);
 }
 function badge(punch) {
   if (!punch) return '<span class="pill pending">Not recorded</span>';
@@ -317,10 +323,10 @@ function badge(punch) {
 function minutesStatus(inPunch, outPunch, employee, date) {
   if (!isScheduledWorkday(date, employee.workdays, config().holidays)) return { late: 0, early: 0 };
   if (!inPunch || !outPunch) return { late: 0, early: 0 };
-  const hours = premiumBreakdown(date, inPunch, outPunch);
-  const arrivalDelay = Math.max(0, toMinutes(time24(inPunch.timeUtc)) - 8 * 60);
+  const hours = premiumBreakdown(date, inPunch, outPunch, null, employee);
+  const arrivalDelay = Math.max(0, toMinutes(time24(inPunch.timeUtc)) - toMinutes(employee.scheduleStart || '08:00'));
   return {
-    late: arrivalDelay >= 60 ? Math.min(arrivalDelay, hours.undertimeMinutes) : 0,
+    late: Math.min(arrivalDelay, hours.undertimeMinutes),
     early: hours.undertimeMinutes
   };
 }
@@ -369,9 +375,9 @@ function minutesStatusDay(punches, employee, date) {
   if (!isScheduledWorkday(date, employee.workdays, config().holidays)) return { late: 0, early: 0 };
   const groups = groupPunches(punches);
   if (!groups.length || groups.some(group => !group.inPunch || !group.outPunch)) return { late: 0, early: 0 };
-  const shortfall = dayBreakdown(date, punches, null).undertimeMinutes;
-  const arrivalDelay = Math.max(0, toMinutes(time24(groups[0].inPunch.timeUtc)) - 8 * 60);
-  return { late: arrivalDelay >= 60 ? Math.min(arrivalDelay, shortfall) : 0, early: shortfall };
+  const shortfall = dayBreakdown(date, punches, null, employee).undertimeMinutes;
+  const arrivalDelay = Math.max(0, toMinutes(time24(groups[0].inPunch.timeUtc)) - toMinutes(employee.scheduleStart || '08:00'));
+  return { late: Math.min(arrivalDelay, shortfall), early: shortfall };
 }
 function locationText(p) {
   if (!p) return '—';
@@ -411,6 +417,7 @@ async function loadEmployee(range = state.historyRange || currentRange()) {
 async function loadEmployees() { state.employees = (await api('/api/admin/employees')).employees; }
 async function loadAdmin(range = state.adminRange || currentRange(), employeeId = null, rememberRange = true) {
   if (rememberRange) state.adminRange = range;
+  await api('/api/admin/extensions/sync', { method: 'POST', body: JSON.stringify({ from: range.start, to: range.end }) });
   state.adminData = await api(rangeUrl('/api/admin/attendance', range, employeeId));
 }
 function blankBackfillDraft() {
@@ -507,14 +514,12 @@ function renderEmployeeHome() {
   const late = cutoffDates.reduce((n, date) => n + minutesStatusDay(punches.filter(p => p.workDate === date), user, date).late, 0);
   const undertime = cutoffDates.reduce((n, date) => n + minutesStatusDay(punches.filter(p => p.workDate === date), user, date).early, 0);
   const action = holiday ? null : !inPunch ? 'IN' : !outPunch ? 'OUT' : null;
-  const clock = toMinutes(time24(new Date().toISOString()));
-  const canContinue = action === 'OUT' && !extension && clock >= 17 * 60 && clock < 22 * 60;
   const extra = runningBreakdown(workDate, inPunch, outPunch, extension);
   return `<div class="hero"><p class="eyebrow">${h(prettyDate(today()))}</p><h1>${greeting()}, ${h(user.name.split(' ')[0])}</h1><p>Here's your attendance at a glance.</p></div>
-    <div class="grid"><section class="card wide employee-attendance-card"><div class="employee-attendance-head"><div class="card-title"><span class="symbol">◷</span> ${state.employeeData.openShift ? 'OVERNIGHT SHIFT' : "TODAY'S ATTENDANCE"}</div><button class="attendance-view-button" data-nav="history" aria-label="View attendance history" title="View attendance history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.8"></circle></svg></button></div><div class="pill ${statusOf(inPunch,outPunch) === 'Present' ? '' : 'pending'}">${h(holiday && !inPunch && !outPunch ? `Holiday · ${holiday.name}` : statusOf(inPunch,outPunch))}</div><p class="card-sub">Work date: ${h(prettyDate(workDate))}</p><div class="punch-line"><span>Time In</span><strong class="${inPunch ? '' : 'missing'}">${h(formatTime(inPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(inPunch)} ${h(locationText(inPunch))} ${inPunch ? mapLink(inPunch, 'Open Time In map ↗') : ''}</div><div class="punch-line"><span>Time Out</span><strong class="${outPunch ? '' : 'missing'}">${h(formatTime(outPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(outPunch)} ${h(locationText(outPunch))} ${outPunch ? mapLink(outPunch, 'Open Time Out map ↗') : ''}</div>${extension ? `<p class="card-sub">Offsite continuation: ${h(formatTime(extension.continuedAt))}. ${outPunch ? `OT ${h(formatMinutes(extra.overtimeEligible ? extra.overtimeCandidateMinutes : 0))} (${h(extra.overtimeEligible ? extension.overtimeDecision.toLowerCase() : 'below 1 hour')}) · Night differential ${h(formatMinutes(extra.nightCandidateMinutes))} (${h(extra.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}).` : 'Time Out with selfie and GPS when finished. The shift closes automatically at 6:00 AM if still open.'}</p>` : ''}${action ? `<div class="card-actions"><button class="btn auto-punch-button" data-action="capture-auto" data-slot="${action}"><span aria-hidden="true">◎</span> ${action === 'IN' ? 'Time In' : 'Time Out'}</button>${canContinue ? '<button class="btn ghost" data-action="continue-offsite">Continue overtime offsite →</button>' : ''}</div>` : ''}${action ? `<div class="punch-location-status ready"><span>GPS automatically marks this punch as <strong>Onsite</strong> inside the site pin or <strong>Offsite</strong> outside it.</span></div>` : ''}</section>
+    <div class="grid"><section class="card wide employee-attendance-card"><div class="employee-attendance-head"><div class="card-title"><span class="symbol">◷</span> ${state.employeeData.openShift ? 'OVERNIGHT SHIFT' : "TODAY'S ATTENDANCE"}</div><button class="attendance-view-button" data-nav="history" aria-label="View attendance history" title="View attendance history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.8"></circle></svg></button></div><div class="pill ${statusOf(inPunch,outPunch) === 'Present' ? '' : 'pending'}">${h(holiday && !inPunch && !outPunch ? `Holiday · ${holiday.name}` : statusOf(inPunch,outPunch))}</div><p class="card-sub">Work date: ${h(prettyDate(workDate))}</p><div class="punch-line"><span>Time In</span><strong class="${inPunch ? '' : 'missing'}">${h(formatTime(inPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(inPunch)} ${h(locationText(inPunch))} ${inPunch ? mapLink(inPunch, 'Open Time In map ↗') : ''}</div><div class="punch-line"><span>Time Out</span><strong class="${outPunch ? '' : 'missing'}">${h(formatTime(outPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(outPunch)} ${h(locationText(outPunch))} ${outPunch ? mapLink(outPunch, 'Open Time Out map ↗') : ''}</div>${extension && outPunch ? `<p class="card-sub">Overtime automatically applied: ${h(formatMinutes(extra.overtimeCandidateMinutes))} (${h(extension.overtimeDecision.toLowerCase())}) · Night differential ${h(formatMinutes(extra.nightCandidateMinutes))} (${h(extra.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}).</p>` : ''}${action ? `<div class="card-actions"><button class="btn auto-punch-button" data-action="capture-auto" data-slot="${action}"><span aria-hidden="true">◎</span> ${action === 'IN' ? 'Time In' : 'Time Out'}</button></div>` : ''}${action ? `<div class="punch-location-status ready"><span>GPS automatically marks this punch as <strong>Onsite</strong> inside the site pin or <strong>Offsite</strong> outside it.</span></div>` : ''}</section>
     <section class="card"><div class="card-title"><span class="symbol">▤</span> CURRENT CUTOFF</div><div class="card-sub">${h(dateSpan(current))}</div><div class="metric-row"><div class="metric-cell"><div class="metric green">${days.size}</div><span class="label">Days with Time In</span></div><div class="metric-cell"><div class="metric amber">${late}</div><span class="label">Late minutes</span></div></div><p class="card-sub">Undertime: ${h(formatMinutes(undertime))}</p><button class="link-button" data-nav="history">View cutoff details ›</button></section>
     ${recentAttendanceFolders(punches)}${renderHolidayCard()}</div>
-    ${extension && !outPunch ? `<div style="height:16px"></div><div class="notice">Offsite work is still running. Estimated overtime: <strong>${h(formatMinutes(extra.overtimeCandidateMinutes))}</strong>; estimated Night differential: <strong>${h(formatMinutes(extra.nightCandidateMinutes))}</strong>. These are provisional until Time Out or the 6:00 AM auto-close, then require admin approval.</div>` : ''}`;
+    ${inPunch && !outPunch && extra.overtimeCandidateMinutes ? `<div style="height:16px"></div><div class="notice">Current estimated overtime after 5:00 PM: <strong>${h(formatMinutes(extra.overtimeCandidateMinutes))}</strong>. The final OT request is created automatically when Time Out is recorded.</div>` : ''}`;
 }
 
 function employeeAttendanceDayCard(date, pair) {
@@ -573,7 +578,7 @@ function renderCapture() {
   const distance = c.location && site.configured ? Math.round(haversine(c.location.latitude, c.location.longitude, site.siteLat, site.siteLng)) : null;
   c.method = detectedPunchMethod(c.location, extension);
   const accurate = c.location && c.location.accuracyM <= site.maxAccuracyM;
-  return `<div class="section-head"><div><p class="eyebrow">${c.method === 'ONSITE' ? 'ONSITE DETECTED' : 'OFFSITE DETECTED'}</p><h1 class="section-title">${c.slot === 'IN' ? 'Time In' : 'Time Out'}</h1></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">◎</span> AUTOMATIC GPS CHECK</div>${extension && c.slot === 'OUT' ? '<p class="notice">Offsite overtime continuation is active. Finish with a selfie and GPS.</p>' : ''}${c.method === 'OFFSITE' ? `<div class="field"><label for="capture-note">Offsite assignment note (optional)</label><input id="capture-note" maxlength="300" placeholder="e.g. Client visit at Quezon City" value="${h(c.note)}"></div>` : ''}
+  return `<div class="section-head"><div><p class="eyebrow">${c.method === 'ONSITE' ? 'ONSITE DETECTED' : 'OFFSITE DETECTED'}</p><h1 class="section-title">${c.slot === 'IN' ? 'Time In' : 'Time Out'}</h1></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">◎</span> AUTOMATIC GPS CHECK</div>${c.slot === 'OUT' ? '<p class="notice">Any worked time after 5:00 PM will automatically be submitted for overtime approval.</p>' : ''}${c.method === 'OFFSITE' ? `<div class="field"><label for="capture-note">Offsite assignment note (optional)</label><input id="capture-note" maxlength="300" placeholder="e.g. Client visit at Quezon City" value="${h(c.note)}"></div>` : ''}
     <div class="map-card">${c.location ? `<strong>${c.method === 'ONSITE' ? h(site.siteName) : 'Offsite / field location'}</strong><small>GPS accuracy ±${Math.round(c.location.accuracyM)} m${distance !== null ? ` · ${distance} m from site pin` : ''}</small>${mapLink(c.location)}` : '<span class="muted">Capturing device location…</span>'}</div>${c.location && !accurate ? `<div class="notice warn">GPS accuracy is ±${Math.round(c.location.accuracyM)} m. Move near a window or outdoors, then <button class="link-button" data-action="location">retry GPS</button>.</div>` : ''}
     <div class="divider"></div><button class="btn block" data-action="submit-punch" ${!c.location || !c.selfie || !accurate ? 'disabled' : ''}>Upload &amp; Record ${c.slot === 'IN' ? 'Time In' : 'Time Out'}</button><p class="tiny-label">Onsite or Offsite is determined automatically from the saved site pin. Your compressed selfie and GPS map location are uploaded together.</p></div>
     <div class="card"><div class="card-title"><span class="symbol">▣</span> SELFIE PROOF</div><div class="camera-box" id="camera-box">${c.selfie ? `<img src="${c.selfie}" alt="Captured selfie preview">` : '<div class="camera-placeholder"><div class="symbol">◉</div><p>Take a clear selfie for this punch.</p></div>'}</div><div class="capture-actions"><button class="btn secondary" data-action="camera-start">Open camera</button><button class="btn secondary hidden" id="camera-snap" data-action="camera-snap">Take selfie</button><label class="btn ghost" for="selfie-file">Device camera fallback</label><input id="selfie-file" type="file" accept="image/*" capture="user" class="hidden"></div><p class="tiny-label">Selfie and GPS are required for both onsite and offsite employee punches.${c.selfieBytes ? ` Compressed image: ${h(Math.max(1, Math.round(c.selfieBytes / 1024)))} KB.` : ''}</p></div></div>`;
@@ -584,7 +589,7 @@ function renderProfile() {
   if (user.role !== 'admin') return `<div class="section-head"><div><p class="eyebrow">ACCOUNT</p><h1 class="section-title">Profile & security</h1></div></div>
     <div class="split"><div class="card"><div class="card-title"><span class="symbol">◉</span> MY ACCOUNT</div>
       <div class="profile-identity"><div class="profile-avatar">${avatarMarkup(user)}</div><p><strong>${h(user.name)}</strong><br><span class="muted">${h(user.mobile || user.email)} · ${h(user.role)}</span></p></div>
-      <p class="card-sub">Schedule: ${h(formatClockText(user.scheduleStart))}–${h(formatClockText(user.scheduleEnd))} · Complete 8 paid hours; recovered time removes lateness.</p>
+      <p class="card-sub">Schedule: ${h(formatClockText(user.scheduleStart))}–${h(formatClockText(user.scheduleEnd))} · Lunch from 12:00–1:00 PM is excluded. Late or early-out time remains undertime.</p>
       <div class="card-actions"><button class="btn secondary" data-action="logout">Sign out</button>${state.installPrompt ? '<button class="btn ghost" data-action="install">Install PWA</button>' : ''}</div></div>
       <div class="card"><div class="card-title"><span class="symbol">◇</span> CHANGE PASSWORD</div><form id="password-form"><div class="field"><label>Current password</label><input name="currentPassword" type="password" autocomplete="current-password" required></div><div class="field"><label>New password (8+ characters)</label><input name="newPassword" type="password" minlength="8" autocomplete="new-password" required></div><button class="btn" type="submit">Update password</button></form></div></div>`;
 
@@ -608,12 +613,7 @@ function renderAdminHome() {
   const rows = state.adminData.punches, employees = state.employees;
   const todayRows = rows.filter(p => p.workDate === today());
   const present = new Set(todayRows.filter(p => p.slot === 'IN').map(p => p.userId)).size;
-  const pendingPremium = (state.adminData.extensions || []).filter(extension => {
-    const pair = rows.filter(p => p.userId === extension.userId && p.workDate === extension.workDate);
-    const hours = dayBreakdown(extension.workDate, pair, extension);
-    return hours.overtimeEligible && (extension.overtimeDecision === 'PENDING' ||
-      hours.nightCandidateMinutes > 0 && extension.nightDecision === 'PENDING');
-  }).length;
+  const pendingPremium = (state.adminData.extensions || []).filter(extension => premiumReviewState(extension).pending).length;
   const pending = rows.filter(p => p.verification === 'PENDING').length + pendingPremium;
   const incomplete = new Set(todayRows.filter(p => groupPunches(todayRows.filter(q => q.userId === p.userId))
     .some(group => !group.inPunch || !group.outPunch)).map(p => p.userId)).size;
@@ -668,16 +668,29 @@ function punchProofRow(p, slot) {
     : `<div class="proof-photo proof-photo-empty"><span>No selfie</span></div>`;
   return `<section class="proof-row"><div class="proof-row-head"><div><span class="proof-step">${slot === 'IN' ? '01' : '02'}</span><h3>${label}</h3></div>${badge(p)}</div><div class="proof-body"><div class="proof-data"><div class="proof-time"><span>SERVER PUNCH TIME</span><strong>${h(formatShiftTime(p.timeUtc, p.workDate))}</strong><small>${h(punchSource(p))}</small></div>${location}${p.note ? `<div class="proof-note"><span>NOTE</span><p>${h(p.note)}</p></div>` : ''}${p.verification === 'REJECTED' ? `<div class="notice error">Rejected: ${h(p.rejectionReason)}</div>` : ''}${['ONSITE', 'OFFSITE'].includes(p.method) && p.verification !== 'APPROVED' ? `<div class="card-actions"><button class="btn small danger" data-action="verify-reject" data-id="${p.id}">Reject ${label}</button></div>` : ''}</div>${photo}</div></section>`;
 }
+function premiumReviewState(extension) {
+  const punches = state.adminData.punches.filter(p => p.userId === extension.userId && p.workDate === extension.workDate);
+  const complete = groupPunches(punches).length > 0 && groupPunches(punches).every(group => group.inPunch && group.outPunch);
+  const employee = state.employees.find(item => item.id === extension.userId);
+  const hours = dayBreakdown(extension.workDate, punches, extension, employee);
+  const adjustmentPending = hours.proposedTransferMinutes > 0 && extension.adjustmentDecision === 'PENDING';
+  const overtimePending = hours.remainingOvertimeMinutes > 0 && extension.overtimeDecision === 'PENDING';
+  const nightPending = hours.nightCandidateMinutes > 0 && extension.nightDecision === 'PENDING';
+  return { extension, punches, complete, employee, hours,
+    proofReady: isPayrollDayReady(punches), adjustmentPending, overtimePending, nightPending,
+    nightReady: !hours.remainingOvertimeMinutes || extension.overtimeDecision === 'APPROVED',
+    pending: adjustmentPending || overtimePending || nightPending };
+}
 function renderPremiumQueue() {
-  const extensions = state.adminData.extensions || [];
-  return `<section class="card premium-queue"><div class="card-title"><span class="symbol">◷</span> OVERTIME & NIGHT DIFFERENTIAL REVIEW</div><p class="card-sub">Review offsite proof first. Overtime begins after 5:00 PM only when 8 regular hours are complete and needs at least 1 full hour. Work between 10:00 PM and 6:00 AM is tracked separately as Night differential.</p>${extensions.length ? `<div class="list">${extensions.map(extension => {
-    const punches = state.adminData.punches.filter(p => p.userId === extension.userId && p.workDate === extension.workDate);
-    const complete = groupPunches(punches).length && groupPunches(punches).every(group => group.inPunch && group.outPunch);
-    const hours = dayBreakdown(extension.workDate, punches, extension);
-    const proofReady = isPayrollDayReady(punches) && (extension.source !== 'ADMIN' || punches.some(p =>
-      p.slot === 'OUT' && p.method === 'ADMIN' && p.assignmentType === 'OFFSITE' && p.timeUtc > shiftInstant(extension.workDate, '17:00')));
-    return `<div class="list-item premium-item"><div><strong>${h(extension.employeeName)} · ${h(prettyDate(extension.workDate))}</strong><p>${h(extension.source === 'ADMIN' ? 'Admin-entered offsite' : 'Employee offsite')} · In ${h(intervalText(punches, extension.workDate, 'IN'))} · Out ${h(intervalText(punches, extension.workDate, 'OUT'))}</p><p>OT ${h(formatMinutes(hours.overtimeCandidateMinutes))} · ${h(!complete ? 'In progress' : hours.overtimeEligible ? extension.overtimeDecision.toLowerCase() : 'below 1 hour; regular only')} · Night differential ${h(formatMinutes(hours.nightCandidateMinutes))} · ${h(hours.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}</p>${complete && !proofReady ? '<p class="tiny-label">Approved Time In and Time Out proof is required before granting.</p>' : ''}${extension.overtimeReason ? `<p class="tiny-label">OT reason: ${h(extension.overtimeReason)}</p>` : ''}${extension.nightReason ? `<p class="tiny-label">Night differential reason: ${h(extension.nightReason)}</p>` : ''}</div><div class="premium-actions">${complete && hours.overtimeEligible ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Grant OT</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="REJECTED">Deny OT</button>` : ''}${complete && hours.nightCandidateMinutes && extension.overtimeDecision === 'APPROVED' ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Grant Night differential</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="REJECTED">Deny Night differential</button>` : ''}</div></div>`;
-  }).join('')}</div>` : '<div class="empty">No offsite overtime requests in this range.</div>'}</section>`;
+  const reviews = (state.adminData.extensions || []).map(premiumReviewState).filter(review => review.pending);
+  return `<section class="card premium-queue"><div class="card-title"><span class="symbol">◷</span> OVERTIME & NIGHT DIFFERENTIAL REVIEW</div><p class="card-sub">Only employees with an unfinished approval appear here. Completed approval stages disappear automatically.</p>${reviews.length ? `<div class="list">${reviews.map(({ extension, punches, complete, employee, hours, proofReady, adjustmentPending, overtimePending, nightPending, nightReady }) => {
+    const source = extension.source === 'ADMIN' ? 'Admin-entered attendance' : extension.source === 'AUTO' ? 'Auto-applied from Time Out' : 'Legacy offsite continuation';
+    const adjustmentStatus = hours.proposedTransferMinutes ? extension.adjustmentDecision.toLowerCase() : 'not needed';
+    const adjustmentApproved = extension.adjustmentDecision === 'APPROVED';
+    const displayedRegular = hours.regularMinutes + (adjustmentApproved ? hours.proposedTransferMinutes : 0);
+    const displayedShortage = Math.max(0, hours.shortageMinutes - (adjustmentApproved ? hours.proposedTransferMinutes : 0));
+    return `<div class="list-item premium-item"><div><strong>${h(extension.employeeName)} · ${h(prettyDate(extension.workDate))}</strong><p>${h(source)} · Schedule ${h(formatClockText(employee?.scheduleStart || '08:00'))}–${h(formatClockText(employee?.scheduleEnd || '17:00'))}</p><div class="attendance-hour-grid"><div><span>Regular time</span><strong>${h(formatMinutes(displayedRegular))}</strong></div><div><span>Remaining shortage</span><strong>${h(formatMinutes(displayedShortage))}</strong></div><div><span>OT before adjustment</span><strong>${h(formatMinutes(hours.overtimeBeforeAdjustmentMinutes))}</strong></div><div><span>Proposed transfer</span><strong>${h(formatMinutes(hours.proposedTransferMinutes))}</strong></div><div><span>Adjustment status</span><strong>${h(adjustmentStatus)}</strong></div><div><span>Remaining OT</span><strong>${h(formatMinutes(hours.remainingOvertimeMinutes))}</strong></div></div><p>Remaining OT ${h(hours.remainingOvertimeMinutes ? extension.overtimeDecision.toLowerCase() : 'none')} · Night differential ${h(formatMinutes(hours.nightCandidateMinutes))} ${h(hours.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : '')}</p>${complete && !proofReady ? '<p class="tiny-label">Approve the daily attendance before reviewing calculated hours.</p>' : ''}${nightPending && !nightReady ? '<p class="tiny-label">Finish the remaining OT decision to unlock Night differential.</p>' : ''}</div><div class="premium-actions">${complete && adjustmentPending ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="ADJUSTMENT" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Approve regular adjustment</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="ADJUSTMENT" data-decision="REJECTED" ${proofReady ? '' : 'disabled'}>Reject adjustment</button>` : ''}${complete && overtimePending ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Approve remaining OT</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="OVERTIME" data-decision="REJECTED" ${proofReady ? '' : 'disabled'}>Reject remaining OT</button>` : ''}${complete && nightPending && nightReady ? `<button class="btn small secondary" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="APPROVED" ${proofReady ? '' : 'disabled'}>Approve Night differential</button><button class="btn small danger" data-action="premium-review" data-id="${extension.id}" data-stage="NIGHT" data-decision="REJECTED" ${proofReady ? '' : 'disabled'}>Reject Night differential</button>` : ''}</div></div>`;
+  }).join('')}</div>` : '<div class="empty"><strong>Approval completed</strong><p>No employees need overtime or differential approval in this date range.</p></div>'}</section>`;
 }
 function renderRecords() {
   const range = state.adminRange || { start: today(), end: today() };
@@ -686,17 +699,20 @@ function renderRecords() {
 function renderEmployees() {
   const e = state.selectedEmployee;
   const days = e?.workdays || [1, 2, 3, 4, 5, 6];
-  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Employees</h1><p>Create accounts and set workdays. A complete regular day is 8 hours, including 12:00–1:00 PM.</p></div><button class="btn small secondary" data-action="employee-new">New</button></div>
+  const custom = !!e && (e.scheduleStart !== '08:00' || e.scheduleEnd !== '17:00');
+  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Employees</h1><p>Create accounts, assign workdays, and choose Standard or Custom working hours.</p></div><button class="btn small secondary" data-action="employee-new">New</button></div>
     <div class="split"><div class="card"><div class="card-title"><span class="symbol">♙</span> ${e ? 'EDIT EMPLOYEE' : 'CREATE EMPLOYEE'}</div>
     <form id="employee-form"><input type="hidden" name="id" value="${e?.id || ''}">
       <div class="field"><label>Name</label><input name="name" value="${h(e?.name || '')}" required maxlength="120"></div>
       <div class="field"><label for="employee-mobile">Mobile number / login</label><input id="employee-mobile" name="mobile" type="tel" inputmode="numeric" pattern="[0-9]{11}" minlength="11" maxlength="11" placeholder="09XXXXXXXXX" value="${h(e?.mobile || '')}" required><p class="tiny-label">Use exactly 11 numeric characters.</p></div>
       <div class="field"><label>${e ? 'New password (leave blank to keep)' : 'Temporary password (8+ characters)'}</label><input name="password" type="password" minlength="8" ${e ? '' : 'required'} autocomplete="new-password"></div>
-      <div class="notice">Regular schedule: <strong>8:00 AM–5:00 PM</strong> · Regular time is capped at 8 hours and includes 12:00–1:00 PM. A 9:00 AM–5:00 PM shift is therefore complete.</div>
+      <div class="field"><label>Working Hours</label><select id="working-hours-type" name="scheduleType"><option value="STANDARD" ${custom ? '' : 'selected'}>Standard · 8:00 AM–5:00 PM</option><option value="CUSTOM" ${custom ? 'selected' : ''}>Custom schedule</option></select></div>
+      <div id="custom-working-hours" class="field-row ${custom ? '' : 'hidden'}"><div class="field"><label>Scheduled start</label><input name="scheduleStart" type="time" value="${h(e?.scheduleStart || '08:00')}"></div><div class="field"><label>Scheduled end</label><input name="scheduleEnd" type="time" value="${h(e?.scheduleEnd || '17:00')}"></div></div>
+      <div class="notice">A complete regular day requires 8 worked hours. The 12:00–1:00 PM unpaid break is excluded. New Working Hours apply to new attendance only; existing punches keep their recorded schedule.</div>
       <div class="field"><label>Workdays</label><div class="day-picker">${[['Sun',0],['Mon',1],['Tue',2],['Wed',3],['Thu',4],['Fri',5],['Sat',6]].map(([name,n]) => `<label><input type="checkbox" name="day" value="${n}" ${days.includes(n) ? 'checked' : ''}> ${name}</label>`).join('')}</div></div>
       ${e ? `<label class="check-row"><input name="active" type="checkbox" ${e.active ? 'checked' : ''}> Active account</label>` : ''}
       <button class="btn block" type="submit">${e ? 'Save employee' : 'Create account'}</button>
-    </form></div><div class="card"><div class="card-title"><span class="symbol">▤</span> EMPLOYEE LIST</div><div class="list">${state.employees.length ? state.employees.map(item => `<div class="list-item"><div><strong>${h(item.name)}</strong><p>${h(item.mobile || item.email || 'Mobile number not set')} · 8:00 AM–5:00 PM ${item.active ? '' : '· Disabled'}</p></div><div class="employee-actions"><button class="btn small secondary" data-action="employee-edit" data-id="${item.id}">Edit</button><button class="btn small danger" data-action="employee-delete" data-id="${item.id}">Delete</button></div></div>`).join('') : '<div class="empty">No employees yet.</div>'}</div></div></div>`;
+    </form></div><div class="card"><div class="card-title"><span class="symbol">▤</span> EMPLOYEE LIST</div><div class="list">${state.employees.length ? state.employees.map(item => `<div class="list-item"><div><strong>${h(item.name)}</strong><p>${h(item.mobile || item.email || 'Mobile number not set')} · ${h(formatClockText(item.scheduleStart))}–${h(formatClockText(item.scheduleEnd))} ${item.active ? '' : '· Disabled'}</p></div><div class="employee-actions"><button class="btn small secondary" data-action="employee-edit" data-id="${item.id}">Edit</button><button class="btn small danger" data-action="employee-delete" data-id="${item.id}">Delete</button></div></div>`).join('') : '<div class="empty">No employees yet.</div>'}</div></div></div>`;
 }
 function renderSettings() {
   const s = config();
@@ -717,7 +733,7 @@ function renderBackfill() {
     <div class="manual-options">${index > 0 ? `<label class="check-row"><input name="timeInNextDay" type="checkbox" ${segment.timeInNextDay ? 'checked' : ''}> Time In after midnight</label>` : '<input name="timeInNextDay" type="checkbox" hidden>'}<label class="check-row"><input name="timeOutNextDay" type="checkbox" ${segment.timeOutNextDay ? 'checked' : ''}> Time Out after midnight (by 6:00 AM)</label><label class="check-row"><input name="offsite" type="checkbox" ${segment.offsite ? 'checked' : ''}> Offsite / field work</label></div>
     ${saved ? `<div class="manual-saved-proof">${[saved.inPunch, saved.outPunch].filter(Boolean).map(punch => `<span>${punch.slot === 'IN' ? 'In' : 'Out'}: ${h(punchSource(punch))} · ${h(punch.verification.toLowerCase())}${punch.hasSelfie ? ' · selfie' : ''}${mapLink(punch, 'Map ↗')}</span>`).join('')}</div><p class="tiny-label">Unchanged times keep the original selfie, GPS, and approval. Edited times become audited admin corrections.</p>` : ''}</section>`;
   }).join('');
-  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Add attendance</h1><p>Select an employee and work date to load existing punches, edit the times, or add a return-to-work interval.</p></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">＋</span> ADMIN ATTENDANCE EDITOR</div><form id="backfill-form"><div class="field"><label>Employee</label><select name="employeeId" required><option value="">Select employee</option>${state.employees.map(e => `<option value="${e.id}" ${e.id === draft.employeeId ? 'selected' : ''}>${h(e.name)}</option>`).join('')}</select></div><div class="field"><label>Work date</label><input name="workDate" type="date" value="${h(draft.workDate)}" required></div>${state.backfillLoading ? '<div class="notice">Loading saved punches…</div>' : draft.employeeId ? `<div class="notice ${draft.expectedIds.length ? 'success' : ''}">${draft.expectedIds.length ? `${draft.expectedIds.length} existing punch${draft.expectedIds.length === 1 ? '' : 'es'} loaded for this day. Edit only the time that needs correction.` : 'No punches saved for this day yet.'}</div>` : '<p class="tiny-label">Choose an employee to check this day’s current attendance.</p>'}<div class="manual-interval-list">${segments}</div><button class="btn secondary small" type="button" data-action="add-manual-interval" ${state.backfillLoading ? 'disabled' : ''}>＋ Add another Time In / Time Out</button><div class="field settings-extra"><label>Reason / field assignment</label><textarea name="reason" minlength="5" maxlength="300" required placeholder="e.g. Returned to client site for urgent task">${h(draft.reason)}</textarea></div><p class="tiny-label">New or edited punches are marked Created by admin. Existing punches with unchanged times keep their proof. Extra hours still require admin review.</p><button class="btn block" type="submit" ${state.backfillLoading ? 'disabled' : ''}>Review attendance changes</button></form></div><div class="card"><div class="card-title"><span class="symbol">ⓘ</span> HOW HOURS ARE COUNTED</div><p class="card-sub">Regular time starts at 8:00 AM and is capped at 8 hours, including 12:00–1:00 PM. Only time inside saved work intervals counts; gaps between Time Out and the next Time In do not.</p><p class="card-sub">Offsite work after 5:00 PM is considered for overtime once eight regular hours and a full hour of overtime are recorded. Work from 10:00 PM–6:00 AM is also shown as Night differential. Admin reviews each premium stage.</p><button class="link-button" data-nav="records">Review extra hours ›</button></div></div>`;
+  return `<div class="section-head"><div><p class="eyebrow">ADMIN</p><h1 class="section-title">Add attendance</h1><p>Select an employee and work date to load existing punches, edit the times, or add a return-to-work interval.</p></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">＋</span> ADMIN ATTENDANCE EDITOR</div><form id="backfill-form"><div class="field"><label>Employee</label><select name="employeeId" required><option value="">Select employee</option>${state.employees.map(e => `<option value="${e.id}" ${e.id === draft.employeeId ? 'selected' : ''}>${h(e.name)}</option>`).join('')}</select></div><div class="field"><label>Work date</label><input name="workDate" type="date" value="${h(draft.workDate)}" required></div>${state.backfillLoading ? '<div class="notice">Loading saved punches…</div>' : draft.employeeId ? `<div class="notice ${draft.expectedIds.length ? 'success' : ''}">${draft.expectedIds.length ? `${draft.expectedIds.length} existing punch${draft.expectedIds.length === 1 ? '' : 'es'} loaded for this day. Edit only the time that needs correction.` : 'No punches saved for this day yet.'}</div>` : '<p class="tiny-label">Choose an employee to check this day’s current attendance.</p>'}<div class="manual-interval-list">${segments}</div><button class="btn secondary small" type="button" data-action="add-manual-interval" ${state.backfillLoading ? 'disabled' : ''}>＋ Add another Time In / Time Out</button><div class="field settings-extra"><label>Reason / field assignment</label><textarea name="reason" minlength="5" maxlength="300" required placeholder="e.g. Returned to client site for urgent task">${h(draft.reason)}</textarea></div><p class="tiny-label">New or edited punches are marked Created by admin. Existing punches with unchanged times keep their proof. Extra hours still require admin review.</p><button class="btn block" type="submit" ${state.backfillLoading ? 'disabled' : ''}>Review attendance changes</button></form></div><div class="card"><div class="card-title"><span class="symbol">ⓘ</span> HOW HOURS ARE COUNTED</div><p class="card-sub">Regular time counts only actual work from 8:00 AM–12:00 PM and 1:00–5:00 PM. Lunch is excluded, and late or early-out minutes remain undertime.</p><p class="card-sub">Every worked minute after 5:00 PM is automatically submitted for OT approval. Work after 10:00 PM also needs a separate Night differential approval. Gaps between work intervals never earn hours.</p><button class="link-button" data-nav="records">Review extra hours ›</button></div></div>`;
 }
 function reportRows() {
   const range = state.reportRange || currentRange();
@@ -742,25 +758,30 @@ function reportRows() {
       else if (status === 'No record' && date > today()) status = 'Upcoming';
       else if (status === 'No record' && date === today()) status = 'Today · not recorded';
       else if (!scheduled) status = `${status} (off day)`;
-      const hours = dayBreakdown(date, pair, extension);
+      const hours = dayBreakdown(date, pair, extension, employee);
       const payrollReady = isPayrollDayReady(pair);
       const legacyOvertime = payrollReady && !extension ? (otMap.get(`${employee.id}|${date}`) || 0) : 0;
-      const overtime = (payrollReady && hours.overtimeEligible && extension?.overtimeDecision === 'APPROVED'
-        ? hours.overtimeCandidateMinutes : 0) + legacyOvertime;
-      const night = payrollReady && hours.nightCandidateMinutes && (!extension ||
-        extension.overtimeDecision === 'APPROVED' && extension.nightDecision === 'APPROVED')
+      const approvedTransfer = payrollReady && extension?.adjustmentDecision === 'APPROVED'
+        ? hours.proposedTransferMinutes : 0;
+      const overtime = (payrollReady && hours.remainingOvertimeMinutes && extension?.overtimeDecision === 'APPROVED'
+        ? hours.remainingOvertimeMinutes : 0) + legacyOvertime;
+      const night = payrollReady && hours.nightCandidateMinutes && extension &&
+        extension.overtimeDecision === 'APPROVED' && extension.nightDecision === 'APPROVED'
         ? hours.nightCandidateMinutes : 0;
       const overtimeStatus = !extension ? (legacyOvertime ? 'Admin granted' : 'No request') : !complete
-        ? 'In progress' : hours.overtimeEligible ? extension.overtimeDecision : 'Below 1h · regular only';
-      const nightStatus = hours.nightCandidateMinutes ? (extension?.nightDecision || 'Included with attendance') : '—';
+        ? 'In progress' : hours.remainingOvertimeMinutes ? extension.overtimeDecision : 'No remaining OT';
+      const adjustmentStatus = hours.proposedTransferMinutes ? (extension?.adjustmentDecision || 'PENDING') : '—';
+      const nightStatus = hours.nightCandidateMinutes ? (extension?.nightDecision || 'Needs review record') : '—';
       if (status === 'No record' && scheduled) totals.noRecord++;
       if (holiday) totals.holidays++;
       if (status.startsWith('Pending verification') || status.startsWith('Needs correction') ||
-          overtimeStatus === 'PENDING' || nightStatus === 'PENDING') totals.pending++;
-      totals.undertime += scheduled && payrollReady ? hours.undertimeMinutes : 0;
-      totals.regular += payrollReady ? hours.regularMinutes : 0; totals.overtime += overtime; totals.night += night;
-      rows.push({ date, inPunch, outPunch, punches: pair, undertime: scheduled && payrollReady ? hours.undertimeMinutes : 0,
-        regular: payrollReady ? hours.regularMinutes : 0, overtime, night });
+          adjustmentStatus === 'PENDING' || overtimeStatus === 'PENDING' || nightStatus === 'PENDING') totals.pending++;
+      const undertime = Math.max(0, hours.shortageMinutes - approvedTransfer);
+      const regular = hours.regularMinutes + approvedTransfer;
+      totals.undertime += scheduled && payrollReady ? undertime : 0;
+      totals.regular += payrollReady ? regular : 0; totals.overtime += overtime; totals.night += night;
+      rows.push({ date, inPunch, outPunch, punches: pair, undertime: scheduled && payrollReady ? undertime : 0,
+        regular: payrollReady ? regular : 0, overtime, night });
     }
     return { employee, rows, totals };
   });
@@ -884,7 +905,7 @@ function showModal(modal) {
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal filter-modal" role="dialog" aria-modal="true" aria-labelledby="records-filter-title"><div class="modal-head"><div><p class="modal-kicker">ATTENDANCE RECORDS</p><h2 id="records-filter-title">Filter Date Range</h2></div><button class="close" data-action="modal-close" aria-label="Close date filter">×</button></div><p>Records show today by default. Choose another date range when needed.</p><form id="records-filter"><div class="field-row"><div class="field"><label for="records-from">From</label><input id="records-from" type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label for="records-to">To</label><input id="records-to" type="date" name="to" value="${h(range.end)}" required></div></div><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn" type="submit">Apply Filter</button></div></form></div></div>`;
   } else if (modal.kind === 'employee-confirm') {
     const { input, editing } = modal;
-    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="employee-confirm-title"><div class="modal-head"><div><p class="modal-kicker">REVIEW ACTION</p><h2 id="employee-confirm-title">Review employee account</h2></div><button class="close" data-action="modal-close" aria-label="Close employee review">×</button></div><p>Check these details before ${editing ? 'updating' : 'creating'} the account.</p><div class="review-list"><div class="review-row"><span>Action</span><strong>${editing ? 'Update employee' : 'Create employee'}</strong></div><div class="review-row"><span>Name</span><strong>${h(input.name)}</strong></div><div class="review-row"><span>Mobile login</span><strong>${h(input.mobile)}</strong></div><div class="review-row"><span>Workdays</span><strong>${h(workdayLabel(input.workdays))}</strong></div>${editing ? `<div class="review-row"><span>Account</span><strong>${input.active ? 'Active' : 'Disabled'}</strong></div>` : ''}<div class="review-row"><span>Password</span><strong>${input.password ? (editing ? 'Will be changed' : 'Temporary password is set') : 'Keep current password'}</strong></div></div><div class="notice warn">Confirm only after reviewing the employee login and schedule.</div><form id="employee-confirm-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm &amp; ${editing ? 'Save' : 'Create'}</button></div></form></div></div>`;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="employee-confirm-title"><div class="modal-head"><div><p class="modal-kicker">REVIEW ACTION</p><h2 id="employee-confirm-title">Review employee account</h2></div><button class="close" data-action="modal-close" aria-label="Close employee review">×</button></div><p>Check these details before ${editing ? 'updating' : 'creating'} the account.</p><div class="review-list"><div class="review-row"><span>Action</span><strong>${editing ? 'Update employee' : 'Create employee'}</strong></div><div class="review-row"><span>Name</span><strong>${h(input.name)}</strong></div><div class="review-row"><span>Mobile login</span><strong>${h(input.mobile)}</strong></div><div class="review-row"><span>Working Hours</span><strong>${h(input.scheduleType === 'STANDARD' ? 'Standard' : 'Custom')} · ${h(formatClockText(input.scheduleStart))}–${h(formatClockText(input.scheduleEnd))}</strong></div><div class="review-row"><span>Workdays</span><strong>${h(workdayLabel(input.workdays))}</strong></div>${editing ? `<div class="review-row"><span>Account</span><strong>${input.active ? 'Active' : 'Disabled'}</strong></div>` : ''}<div class="review-row"><span>Password</span><strong>${input.password ? (editing ? 'Will be changed' : 'Temporary password is set') : 'Keep current password'}</strong></div></div><div class="notice warn">Confirm only after reviewing the employee login and schedule.</div><form id="employee-confirm-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm &amp; ${editing ? 'Save' : 'Create'}</button></div></form></div></div>`;
   } else if (modal.kind === 'attendance-confirm') {
     const { input, employeeName } = modal;
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="attendance-confirm-title"><div class="modal-head"><div><p class="modal-kicker">REVIEW ACTION</p><h2 id="attendance-confirm-title">Review attendance changes</h2></div><button class="close" data-action="modal-close" aria-label="Close attendance review">×</button></div><p>Verify the intervals before saving this workday.</p><div class="review-list"><div class="review-row"><span>Employee</span><strong>${h(employeeName)}</strong></div><div class="review-row"><span>Work date</span><strong>${h(numericDate(input.workDate))}</strong></div>${input.segments.map((segment, index) => `<div class="review-row"><span>Interval ${index + 1}</span><strong>${h(segment.timeIn)}${segment.timeInNextDay ? ' (+1 day)' : ''} → ${h(segment.timeOut || 'Open')}${segment.timeOutNextDay ? ' (+1 day)' : ''} · ${segment.offsite ? 'Offsite' : 'Onsite'}</strong></div>`).join('')}<div class="review-row"><span>Reason</span><strong>${h(input.reason)}</strong></div></div><div class="notice warn">Edited punches replace the active time and keep the original in the audit trail. Unchanged punches keep their selfie, GPS, and verification.</div><form id="attendance-confirm-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm &amp; Save</button></div></form></div></div>`;
@@ -895,18 +916,19 @@ function showModal(modal) {
     const payrollReady = isPayrollDayReady(modal.punches);
     const complete = segments.length && segments.every(group => group.inPunch && group.outPunch);
     const reviewAction = payrollReady
-      ? '<div class="notice success proof-payroll-status"><strong>Daily attendance approved.</strong> This day is included in payroll.</div>'
+      ? '<div class="notice success proof-payroll-status"><strong>Regular attendance approved.</strong> Regular hours and undertime are included in payroll; OT and Night differential still require separate approval.</div>'
       : complete
         ? `<div class="proof-approve"><p>Review every punch time, GPS location, and photo before approval.</p><button class="btn" data-action="approve-attendance-day" data-user-id="${h(modal.punches[0].userId)}" data-work-date="${h(modal.workDate)}">Approve Daily Attendance</button></div>`
         : '<div class="notice warn proof-payroll-status">Time In and Time Out must be recorded for every interval before this day can be approved for payroll.</div>';
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal proof-modal" role="dialog" aria-modal="true" aria-labelledby="proof-day-title"><div class="modal-head"><div><p class="modal-kicker">DAILY ATTENDANCE REVIEW</p><h2 id="proof-day-title">${h(modal.employeeName)}</h2><p>${h(prettyDate(modal.workDate))}</p></div><button class="close" data-action="modal-close" aria-label="Close daily proof">×</button></div><div class="proof-rows">${segments.map((group, index) => `<h3 class="proof-interval-title">Work interval ${index + 1}</h3>${punchProofRow(group.inPunch, 'IN')}${punchProofRow(group.outPunch, 'OUT')}`).join('')}</div>${reviewAction}<button class="btn secondary small" data-action="edit-record-day" data-user-id="${h(modal.punches[0]?.userId)}" data-work-date="${h(modal.workDate)}">Edit or add interval</button></div></div>`;
   } else if (modal.kind === 'approve-day') {
-    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="approve-day-title"><div class="modal-head"><div><p class="modal-kicker">CONFIRM ATTENDANCE</p><h2 id="approve-day-title">Approve daily attendance?</h2></div><button class="close" data-action="modal-close" aria-label="Close attendance approval">×</button></div><p><strong>${h(modal.employeeName)}</strong> · ${h(prettyDate(modal.workDate))}</p><div class="notice">This approves both Time In and Time Out. The approved workday will be included in payroll.</div><form id="approve-day-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Confirm Approval</button></div></form></div></div>`;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="approve-day-title"><div class="modal-head"><div><p class="modal-kicker">CONFIRM ATTENDANCE</p><h2 id="approve-day-title">Approve regular attendance?</h2></div><button class="close" data-action="modal-close" aria-label="Close attendance approval">×</button></div><p><strong>${h(modal.employeeName)}</strong> · ${h(prettyDate(modal.workDate))}</p><div class="notice">This approves all Time In and Time Out proof for the day. Regular hours and undertime enter payroll; any time after 5:00 PM remains pending for separate OT approval.</div><form id="approve-day-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Approve Regular Time</button></div></form></div></div>`;
   } else if (modal.kind === 'premium') {
     const { extension, stage, decision } = modal;
     const pin = extension.latitude == null ? '<p class="card-sub">Admin-created offsite attendance · no employee GPS proof.</p>'
       : `<div class="map-card"><strong>Continuation GPS: ${h(extension.latitude)}, ${h(extension.longitude)}</strong><small>Accuracy ±${h(Math.round(extension.accuracyM))} m</small>${mapLink(extension, 'Open continuation in Google Maps ↗')}</div>`;
-    holder.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-label="Review extra hours"><div class="modal-head"><h2>${decision === 'APPROVED' ? 'Grant' : 'Deny'} ${stage === 'OVERTIME' ? 'overtime' : 'Night differential'}</h2><button class="close" data-action="modal-close" aria-label="Close">×</button></div><p>${h(extension.employeeName)} · ${h(prettyDate(extension.workDate))}</p>${pin}<form id="premium-review-form"><input type="hidden" name="id" value="${h(extension.id)}"><input type="hidden" name="stage" value="${h(stage)}"><input type="hidden" name="decision" value="${h(decision)}"><div class="field"><label for="premium-reason">Reason (optional)</label><textarea id="premium-reason" name="reason" maxlength="300" placeholder="Add a note for the payroll audit trail"></textarea></div><button class="btn block ${decision === 'REJECTED' ? 'danger' : ''}" type="submit">Confirm ${decision === 'APPROVED' ? 'grant' : 'denial'}</button></form></div></div>`;
+    const stageLabel = stage === 'ADJUSTMENT' ? 'regular-time adjustment' : stage === 'OVERTIME' ? 'remaining overtime' : 'Night differential';
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-label="Review extra hours"><div class="modal-head"><h2>${decision === 'APPROVED' ? 'Approve' : 'Reject'} ${stageLabel}</h2><button class="close" data-action="modal-close" aria-label="Close">×</button></div><p>${h(extension.employeeName)} · ${h(prettyDate(extension.workDate))}</p>${pin}<form id="premium-review-form"><input type="hidden" name="id" value="${h(extension.id)}"><input type="hidden" name="stage" value="${h(stage)}"><input type="hidden" name="decision" value="${h(decision)}"><div class="field"><label for="premium-reason">Reason (optional)</label><textarea id="premium-reason" name="reason" maxlength="300" placeholder="Add a note for the payroll audit trail"></textarea></div><button class="btn block ${decision === 'REJECTED' ? 'danger' : ''}" type="submit">Confirm ${decision === 'APPROVED' ? 'approval' : 'rejection'}</button></form></div></div>`;
   } else if (modal.kind === 'delete-employee') {
     const e = modal.employee;
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="delete-employee-title"><div class="modal-head"><div><p class="modal-kicker">CONFIRM DELETION</p><h2 id="delete-employee-title">Delete employee account?</h2></div><button class="close" data-action="modal-close" aria-label="Close employee deletion">×</button></div><p><strong>${h(e.name)}</strong> · ${h(e.mobile || e.email)}</p><p class="notice warn">This permanently deletes the employee account, attendance, review requests, sessions, and selfies. The audit trail remains.</p><form id="delete-employee-form"><input type="hidden" name="id" value="${h(e.id)}"><div class="field"><label>Type DELETE to confirm</label><input name="confirmation" required autocomplete="off" pattern="DELETE"></div><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn danger" type="submit">Confirm deletion</button></div></form></div></div>`;
@@ -1032,7 +1054,7 @@ async function submitPunch() {
     selfie: c.selfie, note: c.note }) });
   stopCamera(); state.capture = null;
   await loadEmployee(currentRange()); state.section = 'home'; render();
-  flash(`${result.punch.slot === 'IN' ? 'Time In' : 'Time Out'} saved at ${formatTime(result.punch.timeUtc)}. Pending admin verification.`, 'success');
+  flash(`${result.punch.slot === 'IN' ? 'Time In' : 'Time Out'} saved at ${formatTime(result.punch.timeUtc)}. Pending admin verification.${result.overtimeAutoApplied ? ' Worked time after 5:00 PM was automatically submitted for OT approval.' : ''}`, 'success');
 }
 
 function updateOnline() { document.getElementById('offline')?.classList.toggle('hidden', navigator.onLine); }
@@ -1191,6 +1213,12 @@ document.addEventListener('click', async event => {
 
 document.addEventListener('change', async event => {
   try {
+    if (event.target.id === 'working-hours-type') {
+      const custom = event.target.value === 'CUSTOM';
+      document.getElementById('custom-working-hours')?.classList.toggle('hidden', !custom);
+      for (const input of document.querySelectorAll('#custom-working-hours input')) input.required = custom;
+      return;
+    }
     if (event.target.closest('#report-filter')) {
       if (event.target.name === 'period') {
         state.reportRange = event.target.value === 'current' ? null : { ...currentRange() };
@@ -1296,12 +1324,17 @@ document.addEventListener('submit', async event => {
       const punches = state.adminData.punches.filter(item => item.userId === context.userId && item.workDate === context.workDate);
       showModal({ kind: 'record-day', punches, employeeName: context.employeeName, workDate: context.workDate });
       await loadProofSelfies(punches);
-      return flash('Daily attendance approved and included in payroll.', 'success');
+      return flash('Regular attendance approved. Any worked time after 5:00 PM is now ready for separate OT review.', 'success');
     }
     if (id === 'premium-review-form') {
       await api(`/api/admin/extensions/${values.id}/review`, { method: 'POST', body: JSON.stringify(values) });
       closeModal(); await loadAdmin(state.adminRange || currentRange()); renderView();
-      return flash(`${values.stage === 'OVERTIME' ? 'Overtime' : 'Night differential'} ${values.decision === 'APPROVED' ? 'granted' : 'denied'}.`, 'success');
+      const label = values.stage === 'ADJUSTMENT' ? 'Regular-time adjustment' : values.stage === 'OVERTIME' ? 'Remaining overtime' : 'Night differential';
+      const updated = state.adminData.extensions.find(extension => extension.id === values.id);
+      const completed = !updated || !premiumReviewState(updated).pending;
+      return flash(completed
+        ? `Approval completed. ${updated?.employeeName || 'Employee'} no longer needs extra-hours review.`
+        : `${label} ${values.decision === 'APPROVED' ? 'approved' : 'rejected'}. Remaining decisions are ready below.`, 'success');
     }
     if (id === 'site-settings-form') {
       const input = { siteName: values.siteName, siteLat: Number(values.siteLat), siteLng: Number(values.siteLng), radiusM: Number(values.radiusM), maxAccuracyM: Number(values.maxAccuracyM), cutoffDays: config().cutoffDays };
@@ -1328,7 +1361,9 @@ document.addEventListener('submit', async event => {
       await loadBranding(); await refreshSession(); closeModal(); render(); return flash('App name and logo saved.', 'success');
     }
     if (id === 'employee-form') {
-      const input = { name: values.name, mobile: values.mobile, password: values.password, scheduleStart: '08:00', scheduleEnd: '17:00',
+      const custom = values.scheduleType === 'CUSTOM';
+      const input = { name: values.name, mobile: values.mobile, password: values.password, scheduleType: custom ? 'CUSTOM' : 'STANDARD',
+        scheduleStart: custom ? values.scheduleStart : '08:00', scheduleEnd: custom ? values.scheduleEnd : '17:00',
         workdays: [...form.querySelectorAll('input[name="day"]:checked')].map(el => Number(el.value)), active: !!values.active };
       const editing = !!values.id;
       showModal({ kind: 'employee-confirm', input, employeeId: values.id || null, editing }); return;

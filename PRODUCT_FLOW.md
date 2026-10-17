@@ -9,7 +9,7 @@ Ang reference UI ay ang ipinadalang dark navy/teal mobile dashboard: greeting sa
 ## 2. Mga kailangang i-set ng admin bago gamitin
 
 1. **Payroll cutoff:** start/end day ng dalawang period bawat buwan (sample mula sa screenshot: 11–25 at 26–10). Inclusive ang dates; dapat tama rin ang period na tumatawid ng buwan o taon.
-2. **Work schedule:** fixed regular window na 8:00 AM–5:00 PM (9 oras, kasama ang break), workdays, at Asia/Manila timezone. Late agad pag lampas 8:00 AM. Tingnan ang [regular at premium workflow](PREMIUM_FLOW.md).
+2. **Work schedule:** Standard 8:00 AM–5:00 PM o Custom start/end per employee; excluded ang 12:00–1:00 PM unpaid break, kasama ang configured workdays at Asia/Manila timezone. Ang shortage ay maaaring punan mula sa eligible 5:00–10:00 PM OT pagkatapos ng hiwalay na admin approval. Tingnan ang [regular at premium workflow](PREMIUM_FLOW.md).
 3. **Nag-iisang onsite location:** admin ang magse-set at mag-a-update ng site name/address, GPS pin (latitude/longitude), at allowed radius/geofence. Itatala ang history ng pin/radius changes para hindi maiba ang interpretasyon ng lumang punches.
 4. **Employee accounts:** full name, employee ID, status, role, at assigned schedule. Admin ang gagawa at magdi-disable ng account.
 5. **Verification policy:** sino ang puwedeng mag-approve ng offsite entries at ilang araw bago ma-lock ang cutoff.
@@ -101,7 +101,7 @@ Ang oras sa regular, overtime, at Differential windows ay nasa [premium workflow
 
 - **Employee:** ID, name, account state, assigned schedule.
 - **Site settings:** iisang active site, coordinates, radius, effective dates/version, at admin change history.
-- **Schedule:** Asia/Manila timezone, fixed 8:00 AM–5:00 PM regular window, at workdays; walang grace period.
+- **Schedule:** Asia/Manila timezone, Standard 8:00 AM–5:00 PM o Custom start/end, at workdays; walang grace period.
 - **Cutoff:** start/end dates, state (open/finalized), report version.
 - **Attendance event:** employee, work date, slot (AM In/PM Out), official timestamp, source (`onsite`/`offsite`/`admin`), device capture time, site settings version/geofence result, coordinates and accuracy, selfie reference, verification state, admin reason, creator/reviewer, timestamps.
 - **Audit log:** login/session activity as appropriate, punch submission, approval/rejection, admin backfill, correction, cutoff finalization, and export/print.

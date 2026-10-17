@@ -27,6 +27,7 @@ export default defineSchema({
   punches: defineTable({
     userId: v.id('users'), workDate: v.string(), slot: v.union(v.literal('IN'), v.literal('OUT')),
     segment: v.optional(v.number()),
+    scheduleStart: v.optional(v.string()), scheduleEnd: v.optional(v.string()),
     method: v.union(v.literal('ONSITE'), v.literal('OFFSITE'), v.literal('ADMIN'), v.literal('SYSTEM')),
     timeUtc: v.string(), submittedAt: v.string(), latitude: v.optional(v.number()),
     longitude: v.optional(v.number()), accuracyM: v.optional(v.number()),
@@ -39,12 +40,14 @@ export default defineSchema({
   }).index('by_date', ['workDate']).index('by_user_date', ['userId', 'workDate']),
   extensions: defineTable({
     userId: v.id('users'), workDate: v.string(), continuedAt: v.string(),
-    source: v.union(v.literal('OFFSITE'), v.literal('ADMIN')),
+    source: v.union(v.literal('OFFSITE'), v.literal('ADMIN'), v.literal('AUTO')),
     latitude: v.optional(v.number()), longitude: v.optional(v.number()),
     accuracyM: v.optional(v.number()), note: v.string(),
     overtimeDecision: v.union(v.literal('PENDING'), v.literal('APPROVED'), v.literal('REJECTED')),
+    adjustmentDecision: v.optional(v.union(v.literal('PENDING'), v.literal('APPROVED'), v.literal('REJECTED'))),
     nightDecision: v.union(v.literal('PENDING'), v.literal('APPROVED'), v.literal('REJECTED')),
-    overtimeReason: v.optional(v.string()), nightReason: v.optional(v.string()),
+    adjustmentReason: v.optional(v.string()), overtimeReason: v.optional(v.string()), nightReason: v.optional(v.string()),
+    adjustmentReviewedBy: v.optional(v.id('users')), adjustmentReviewedAt: v.optional(v.string()),
     overtimeReviewedBy: v.optional(v.id('users')), nightReviewedBy: v.optional(v.id('users')),
     overtimeReviewedAt: v.optional(v.string()), nightReviewedAt: v.optional(v.string())
   }).index('by_date', ['workDate']).index('by_user_date', ['userId', 'workDate']),
