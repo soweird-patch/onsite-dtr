@@ -29,17 +29,20 @@ export function reportFixture(dayCount = 1, intervalCount = 2) {
 
 test('report renders every interval detail, escapes text, and includes open and legacy punches', () => {
   const fixture = reportFixture();
+  for (const punch of fixture.rows[0].punches) punch.assignmentType = 'ONSITE';
   fixture.rows[0].punches[0].reason = fixture.rows[0].punches[1].reason = '<script>unsafe</script>';
   const details = attendanceDetails(fixture.rows);
   assert.equal(details.length, 2);
   assert.notEqual(details[0].fieldAssignment, details[1].fieldAssignment);
   const app = appHarness();
   const html = app.renderReportEmployee(fixture, { start: '2026-10-01', end: '2026-10-01' }, 'QA', true);
-  assert.ok(html.includes('data-label="Date">Thursday 10/01/2026</td>'));
+  assert.ok(html.includes('data-label="Day">Thursday</td><td data-label="Date">10/01/2026</td>'));
   assert.ok(html.includes('data-label="Source">Admin</td>'));
+  assert.ok(html.includes('data-label="Status">Onsite</td>'));
   assert.ok(!html.includes('Admin / Admin'));
   assert.ok(html.indexOf('Reasons and Field Assignments') > html.indexOf('Night differential</th>'));
-  assert.ok(html.includes('<th>Date</th><th>Time In</th><th>Time Out</th><th>Reason</th><th>Field Assignment</th>'));
+  assert.ok(html.includes('<th>Day</th><th>Date</th><th>Time In</th><th>Time Out</th><th>Status</th><th>Reason</th><th>Field Assignment</th>'));
+  assert.ok(html.includes('<th>Day</th><th>Date</th><th>Time In</th><th>Time Out</th><th>Source</th><th>Status</th><th>Regular</th>'));
   assert.ok(html.includes('&lt;script&gt;unsafe&lt;/script&gt;'));
   assert.ok(!html.includes('<script>unsafe</script>'));
   assert.ok(html.includes('Assignment 1-1:'));
@@ -102,7 +105,8 @@ test('report shows employee/admin source and pending OT separately from approved
   assert.equal(report.totals.overtime,0);
   assert.equal(report.totals.pendingOvertime,105);
   let html=app.renderReportEmployee(report,{start:date,end:date},'QA',true);
-  assert.ok(html.includes('Employee · Onsite / Employee · Offsite'));
+  assert.ok(html.includes('data-label="Source">Employee</td>'));
+  assert.ok(html.includes('data-label="Status">Onsite / Offsite</td>'));
   assert.ok(html.includes('Pending OT: 1h 45m'));
   extension.overtimeDecision='APPROVED';
   report=app.reportRows()[0];
@@ -110,8 +114,14 @@ test('report shows employee/admin source and pending OT separately from approved
   assert.equal(report.totals.pendingOvertime,0);
   punches[1].method='ADMIN'; punches[1].assignmentType='OFFSITE';
   html=app.renderReportEmployee(app.reportRows()[0],{start:date,end:date},'QA',true);
-  assert.ok(html.includes('Employee · Onsite / Admin'));
+  assert.ok(html.includes('data-label="Source">Employee / Admin</td>'));
+  assert.ok(html.includes('data-label="Status">Onsite / Offsite</td>'));
   assert.ok(!html.includes('Admin offsite'));
+  punches[0].method='ADMIN'; punches[0].assignmentType='ONSITE';
+  html=app.renderReportEmployee(app.reportRows()[0],{start:date,end:date},'QA',true);
+  assert.ok(html.includes('data-label="Source">Admin</td>'));
+  assert.ok(html.includes('data-label="Status">Onsite / Offsite</td>'));
+  assert.ok(!html.includes('Admin / Admin'));
 });
 
 test('overnight PDF rows and night approval stay on the shift start date across a cutoff', () => {
@@ -134,7 +144,7 @@ test('overnight PDF rows and night approval stay on the shift start date across 
   assert.equal(report.totals.night,480);
   assert.equal(report.totals.overtime,480);
   const html=app.renderReportEmployee(report,{start:date,end:date},'QA',true);
-  assert.ok(html.includes('data-label="Date">Sunday 10/25/2026</td>'));
+  assert.ok(html.includes('data-label="Day">Sunday</td><td data-label="Date">10/25/2026</td>'));
   assert.match(html,/6:00\s*AM/);
   assert.ok(!html.includes('(+1 day)'));
   assert.equal(attendanceDetails(report.rows)[0].date,date);

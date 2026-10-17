@@ -13,13 +13,14 @@ export function attendanceDetails(rows) {
       if (same) {
         const info = inPunch ? first : last;
         if (info.reason || info.fieldAssignment)
-          details.push({ date: row.date, inUtc: inPunch?.timeUtc, outUtc: outPunch?.timeUtc, ...info });
+          details.push({ date: row.date, inUtc: inPunch?.timeUtc, outUtc: outPunch?.timeUtc,
+            punches: [inPunch, outPunch].filter(Boolean), ...info });
       } else {
         for (const punch of [inPunch, outPunch].filter(Boolean)) {
           const info = metadata(punch);
           if (info.reason || info.fieldAssignment) details.push({ date: row.date,
             inUtc: punch.slot === 'IN' ? punch.timeUtc : null,
-            outUtc: punch.slot === 'OUT' ? punch.timeUtc : null, ...info });
+            outUtc: punch.slot === 'OUT' ? punch.timeUtc : null, punches: [punch], ...info });
         }
       }
     }

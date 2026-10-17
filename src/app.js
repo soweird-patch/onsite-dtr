@@ -222,12 +222,21 @@ function numericDate(date) {
   if (!date) return '';
   return `${new Intl.DateTimeFormat('en-PH', { month: '2-digit', day: '2-digit', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`))} ${weekdayLabel(date)}`;
 }
+function reportDay(date) {
+  if (!date) return '';
+  return new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`));
+}
 function reportDate(date) {
   if (!date) return '';
-  const value = new Date(`${date}T00:00:00Z`);
-  const day = new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: 'UTC' }).format(value);
-  const label = new Intl.DateTimeFormat('en-PH', { month: '2-digit', day: '2-digit', year: 'numeric', timeZone: 'UTC' }).format(value);
-  return `${day} ${label}`;
+  return new Intl.DateTimeFormat('en-PH', { month: '2-digit', day: '2-digit', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${date}T00:00:00Z`));
+}
+function reportSource(punches = []) {
+  return [...new Set(punches.map(punch => ({ EMPLOYEE: 'Employee', ADMIN: 'Admin', SYSTEM: 'System' })[punchProvenance(punch).source] || 'Unknown'))].join(' / ') || '—';
+}
+function reportStatus(punches = []) {
+  const locations = punches.map(punch => punch.assignmentType || punchProvenance(punch).locationType)
+    .filter(type => ['ONSITE', 'OFFSITE'].includes(type));
+  return [...new Set(locations)].map(type => type === 'ONSITE' ? 'Onsite' : 'Offsite').join(' / ') || '—';
 }
 function incomingHolidays(limit = 4) {
   const dates = new Map((config()?.legalHolidays || []).filter(item => item.type === 'Special working').map(item => [item.date, item]));
@@ -898,19 +907,19 @@ function renderReportHeader(range, generated, className = '') {
 function renderReportEmployee({ employee, rows, totals }, range, generated, visible = false) {
   const details = attendanceDetails(rows);
   const detailTable = details.length ? `<h3 class="report-details-title">Reasons and Field Assignments</h3>
-    <div class="table-wrap report-details-wrap"><table class="table report-details"><thead><tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Reason</th><th>Field Assignment</th></tr></thead><tbody>${details.map(item => `<tr>
-      <td data-label="Date">${h(reportDate(item.date))}</td><td data-label="Time In">${h(formatTime(item.inUtc))}</td>
-      <td data-label="Time Out">${h(formatTime(item.outUtc))}</td><td data-label="Reason">${h(item.reason || '—')}</td>
+    <div class="table-wrap report-details-wrap"><table class="table report-details"><thead><tr><th>Day</th><th>Date</th><th>Time In</th><th>Time Out</th><th>Status</th><th>Reason</th><th>Field Assignment</th></tr></thead><tbody>${details.map(item => `<tr>
+      <td data-label="Day">${h(reportDay(item.date))}</td><td data-label="Date">${h(reportDate(item.date))}</td><td data-label="Time In">${h(formatTime(item.inUtc))}</td>
+      <td data-label="Time Out">${h(formatTime(item.outUtc))}</td><td data-label="Status">${h(reportStatus(item.punches))}</td><td data-label="Reason">${h(item.reason || '—')}</td>
       <td data-label="Field Assignment">${h(item.fieldAssignment || '—')}</td></tr>`).join('')}</tbody></table></div>` : '';
-  const body = rows.map(row => `<tr><td data-label="Date">${h(reportDate(row.date))}</td>
+  const body = rows.map(row => `<tr><td data-label="Day">${h(reportDay(row.date))}</td><td data-label="Date">${h(reportDate(row.date))}</td>
     <td data-label="Time In">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatTime(group.inPunch?.timeUtc))}</div>`).join('') || '—'}</td>
     <td data-label="Time Out">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatTime(group.outPunch?.timeUtc))}</div>`).join('') || '—'}</td>
-    <td data-label="Source">${h([...new Set(row.punches.map(punchSource))].join(' / ') || '—')}</td>
+    <td data-label="Source">${h(reportSource(row.punches))}</td><td data-label="Status">${h(reportStatus(row.punches))}</td>
     <td data-label="Regular">${h(formatMinutes(row.regular))}</td><td data-label="Undertime">${h(formatMinutes(row.undertime))}</td>
     <td data-label="Overtime">${h(formatMinutes(row.overtime))}${row.pendingOvertime ? `<small class="report-pending">Pending OT: ${h(formatMinutes(row.pendingOvertime))}</small>` : ''}</td><td data-label="Night differential">${h(formatMinutes(row.night))}${row.pendingNight ? `<small class="report-pending">Pending ND: ${h(formatMinutes(row.pendingNight))}</small>` : ''}</td></tr>`).join('');
   return `<section class="report-employee ${visible ? '' : 'report-unselected'}">${renderReportHeader(range, generated, 'employee-report-header')}<div class="report-employee-head"><div><span>EMPLOYEE</span><h3>${h(employee.name)}</h3></div><div class="report-total"><span>Approved regular</span><strong>${h(formatMinutes(totals.regular))}</strong></div></div>
     <div class="report-summary-grid"><div><span>Approved Overtime</span><strong>${h(formatMinutes(totals.overtime))}</strong>${totals.pendingOvertime ? `<small class="report-pending">Pending OT: ${h(formatMinutes(totals.pendingOvertime))}</small>` : ''}</div><div><span>Approved night differential</span><strong>${h(formatMinutes(totals.night))}</strong>${totals.pendingNight ? `<small class="report-pending">Pending ND: ${h(formatMinutes(totals.pendingNight))}</small>` : ''}</div><div><span>Undertime</span><strong>${h(formatMinutes(totals.undertime))}</strong></div><div><span>Exceptions</span><strong>${totals.pending}</strong></div><div><span>No record</span><strong>${totals.noRecord}</strong></div><div><span>Holidays</span><strong>${totals.holidays}</strong></div></div>
-    <div class="table-wrap"><table class="table"><thead><tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Source</th><th>Regular</th><th>Undertime</th><th>Overtime</th><th>Night differential</th></tr></thead><tbody>${body}</tbody></table></div>${detailTable}</section>`;
+    <div class="table-wrap"><table class="table report-attendance"><thead><tr><th>Day</th><th>Date</th><th>Time In</th><th>Time Out</th><th>Source</th><th>Status</th><th>Regular</th><th>Undertime</th><th>Overtime</th><th>Night differential</th></tr></thead><tbody>${body}</tbody></table></div>${detailTable}</section>`;
 }
 function renderReport() {
   const range = state.reportRange || currentRange();
