@@ -161,17 +161,17 @@ test('second interval fills the eight-hour shortage before OT; a third night int
   assert.equal(expectedTimeOut(date,[intervals[0],{inUtc:shiftInstant(date,'17:00')}]),shiftInstant(date,'19:00'));
 });
 
-test('night-only intervals never fill an unfinished regular day or increase OT', () => {
+test('night-only intervals remain intact in OT total without filling regular shortage', () => {
   const date = '2026-10-15';
   const intervals = [
     {inUtc:shiftInstant(date,'08:00'),outUtc:shiftInstant(date,'15:00')},
     {inUtc:shiftInstant(date,'22:00'),outUtc:shiftInstant(date,'02:00',true)}
   ];
   assertBreakdown(workBreakdownIntervals(date,intervals), {
-    regularMinutes:360,shortageMinutes:120,overtimeCandidateMinutes:0,nightCandidateMinutes:240
+    regularMinutes:360,shortageMinutes:120,overtimeCandidateMinutes:0,nightCandidateMinutes:240,totalOvertimeCandidateMinutes:240
   });
   assert.deepEqual(workIntervalBreakdowns(date,intervals)[1], {
-    number:2,regularMinutes:0,regularTopUpMinutes:0,overtimeCandidateMinutes:0,nightCandidateMinutes:240,shortageAfterMinutes:120
+    number:2,regularMinutes:0,regularTopUpMinutes:0,overtimeCandidateMinutes:0,nightCandidateMinutes:240,totalOvertimeCandidateMinutes:240,shortageAfterMinutes:120
   });
 });
 
@@ -185,7 +185,7 @@ test('an interval crossing 10 PM splits into regular top-up, OT, and ND without 
     regularMinutes:480,overtimeCandidateMinutes:60,nightCandidateMinutes:180
   });
   assert.deepEqual(workIntervalBreakdowns(date,intervals)[1],{
-    number:2,regularMinutes:60,regularTopUpMinutes:60,overtimeCandidateMinutes:60,nightCandidateMinutes:180,shortageAfterMinutes:0
+    number:2,regularMinutes:60,regularTopUpMinutes:60,overtimeCandidateMinutes:60,nightCandidateMinutes:180,totalOvertimeCandidateMinutes:240,shortageAfterMinutes:0
   });
 });
 
@@ -205,11 +205,41 @@ test('payroll excludes pending and stale premiums and approves night differentia
   const extension = { calculationKey: premiumCalculationKey(date, punches), overtimeDecision: 'PENDING', nightDecision: 'PENDING' };
   assert.deepEqual(payrollDayTotals(date, punches, extension), { regular: 480, undertime: 0, overtime: 0, night: 0 });
   extension.nightDecision = 'APPROVED';
-  assert.deepEqual(payrollDayTotals(date, punches, extension), { regular: 480, undertime: 0, overtime: 0, night: 60 });
+  assert.deepEqual(payrollDayTotals(date, punches, extension), { regular: 480, undertime: 0, overtime: 60, night: 60 });
   extension.overtimeDecision = 'APPROVED';
-  assert.equal(payrollDayTotals(date, punches, extension).overtime, 300);
+  assert.equal(payrollDayTotals(date, punches, extension).overtime, 360);
   punches[1].timeUtc = shiftInstant(date, '02:00', true);
   assert.deepEqual(payrollDayTotals(date, punches, extension), { regular: 480, undertime: 0, overtime: 0, night: 0 });
   punches[0].verification = 'PENDING';
   assert.deepEqual(payrollDayTotals(date, punches, extension), { regular: 0, undertime: 0, overtime: 0, night: 0 });
+});
+
+test('ND is added after daytime allocation even with ten minutes of regular undertime', () => {
+  const date = '2026-10-15';
+  for (const [arrival, regular, undertime, remainingOT, totalOT] of [
+    ['08:10',470,10,0,120], ['08:00',480,0,0,120], ['07:50',480,0,10,130]
+  ]) {
+    const intervals = [
+      {inUtc:shiftInstant(date,arrival),outUtc:shiftInstant(date,'15:00')},
+      {inUtc:shiftInstant(date,'20:00'),outUtc:shiftInstant(date,'00:00',true)}
+    ];
+    const hours=workBreakdownIntervals(date,intervals);
+    assertBreakdown(hours,{regularMinutes:regular,undertimeMinutes:undertime,
+      remainingOvertimeMinutes:remainingOT,nightCandidateMinutes:120,totalOvertimeCandidateMinutes:totalOT});
+    assert.equal(workBreakdownIntervals(date,[intervals[0],{...intervals[1],outUtc:shiftInstant(date,'22:00')}]).regularMinutes,regular);
+    const contributions=workIntervalBreakdowns(date,intervals);
+    assert.equal(contributions.reduce((sum,part)=>sum+part.totalOvertimeCandidateMinutes,0),totalOT);
+    const punches=intervals.flatMap((interval,index)=>[
+      {segment:index+1,slot:'IN',timeUtc:interval.inUtc,verification:'APPROVED'},
+      {segment:index+1,slot:'OUT',timeUtc:interval.outUtc,verification:'APPROVED'}
+    ]);
+    const review={calculationKey:premiumCalculationKey(date,punches),overtimeDecision:'APPROVED',nightDecision:'PENDING'};
+    assert.deepEqual(payrollDayTotals(date,punches,review),{regular,undertime,overtime:remainingOT,night:0});
+    review.nightDecision='APPROVED';
+    assert.deepEqual(payrollDayTotals(date,punches,review),{regular,undertime,overtime:totalOT,night:120});
+    review.overtimeDecision='REJECTED';
+    assert.deepEqual(payrollDayTotals(date,punches,review),{regular,undertime,overtime:120,night:120});
+    review.nightDecision='REJECTED';
+    assert.deepEqual(payrollDayTotals(date,punches,review),{regular,undertime,overtime:0,night:0});
+  }
 });

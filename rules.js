@@ -195,7 +195,8 @@ export function workBreakdownIntervals(date, intervals = [], continuedAtUtc = nu
     const regularMs = Math.min(regularRemainingMs, item.end - item.start);
     regularRemainingMs -= regularMs;
     // A later daytime interval fills the regular shortage before earning OT.
-    // Night-window work is classified separately and cannot fill that shortage.
+    // Night-window work cannot fill that shortage; add it only to the OT total
+    // after daytime regular hours and remaining daytime OT have been allocated.
     overtimeMs += item.end - item.start - regularMs;
   }
   const overtimeMinutes = Math.floor(overtimeMs / 60000);
@@ -211,6 +212,7 @@ export function workBreakdownIntervals(date, intervals = [], continuedAtUtc = nu
     overtimeBeforeAdjustmentMinutes: overtimeMinutes, proposedTransferMinutes: 0,
     resultingRegularMinutes: regularMinutes, remainingOvertimeMinutes: overtimeMinutes,
     overtimeCandidateMinutes: overtimeMinutes, nightCandidateMinutes,
+    totalOvertimeCandidateMinutes: overtimeMinutes + nightCandidateMinutes,
     overtimeEligible: overtimeMinutes >= MIN_OVERTIME_MINUTES,
     expectedTimeOutUtc: expectedTimeOut(date, intervals) };
 }
@@ -229,6 +231,7 @@ export function workIntervalBreakdowns(date, intervals = []) {
       regularTopUpMinutes: index > 0 ? regularMinutes : 0,
       overtimeCandidateMinutes: after.overtimeCandidateMinutes - before.overtimeCandidateMinutes,
       nightCandidateMinutes: after.nightCandidateMinutes - before.nightCandidateMinutes,
+      totalOvertimeCandidateMinutes: after.totalOvertimeCandidateMinutes - before.totalOvertimeCandidateMinutes,
       shortageAfterMinutes: after.shortageMinutes };
     before = after;
   }
@@ -236,6 +239,8 @@ export function workIntervalBreakdowns(date, intervals = []) {
 }
 
 export function premiumCalculationKey(date, punches) {
+  // Combining reviewed daytime OT and ND is a derived total. Keep the same
+  // review revision while the individual component calculations are unchanged.
   return JSON.stringify(['actual-hours-v3-night-only', date, groupPunches(punches).map(group => [
     group.inPunch?.timeUtc || null, group.outPunch?.timeUtc || null,
     group.inPunch?.scheduleStart || REGULAR_START, group.inPunch?.scheduleEnd || REGULAR_END
@@ -248,10 +253,13 @@ export function payrollDayTotals(date, punches, extension) {
   })));
   const ready = isPayrollDayReady(punches);
   const reviewed = extension?.calculationKey === premiumCalculationKey(date, punches);
+  // Each component keeps its own approval. Night hours are a subset of the
+  // combined OT total and must never be used to cover regular-hour undertime.
+  const daytimeOvertime = ready && reviewed && extension.overtimeDecision === 'APPROVED' ? hours.remainingOvertimeMinutes : 0;
+  const night = ready && reviewed && extension.nightDecision === 'APPROVED' ? hours.nightCandidateMinutes : 0;
   return { regular: ready ? hours.regularMinutes : 0,
     undertime: ready ? hours.undertimeMinutes : 0,
-    overtime: ready && reviewed && extension.overtimeDecision === 'APPROVED' ? hours.overtimeCandidateMinutes : 0,
-    night: ready && reviewed && extension.nightDecision === 'APPROVED' ? hours.nightCandidateMinutes : 0 };
+    overtime: daytimeOvertime + night, night };
 }
 
 export function holidayFor(date, holidays = []) {

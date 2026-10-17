@@ -15,6 +15,6 @@ export function appHarness() {
     window: { addEventListener() {}, matchMedia() { return { matches: false }; } },
     navigator: {}, localStorage: { getItem() { return ''; } }, sessionStorage: { getItem() { return ''; } }
   });
-  vm.runInContext(`${source}\nglobalThis.app = { state, renderReportEmployee, renderReport, reportRows, renderBackfill, renderEmployees, renderPremiumQueue };`, context);
+  vm.runInContext(`${source}\nglobalThis.app = { state, renderReportEmployee, renderReport, reportRows, renderBackfill, renderEmployees, renderPremiumQueue, employeeAttendanceDayCardSegments };`, context);
   return context.app;
 }

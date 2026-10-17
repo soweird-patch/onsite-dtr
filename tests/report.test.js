@@ -80,11 +80,11 @@ test('payroll report totals include regular top-up and approved premiums without
   Object.assign(app.state,{employees:[fixture.employee],reportRange:{start:date,end:date},
     session:{today:date,user:{role:'admin'},settings:{holidays:[]}},adminData:{punches,extensions:[extension],overtime:[]}});
   let totals=app.reportRows()[0].totals;
-  assert.deepEqual([totals.regular,totals.undertime,totals.overtime,totals.night],[480,0,60,120]);
+  assert.deepEqual([totals.regular,totals.undertime,totals.overtime,totals.night],[480,0,180,120]);
   app.state.adminData.punches= punches.filter(p=>p.segment!==2);
   extension.calculationKey=premiumCalculationKey(date,app.state.adminData.punches);
   totals=app.reportRows()[0].totals;
-  assert.deepEqual([totals.regular,totals.undertime,totals.overtime,totals.night],[360,120,0,120]);
+  assert.deepEqual([totals.regular,totals.undertime,totals.overtime,totals.night],[360,120,120,120]);
 });
 
 test('report shows employee/admin source and pending OT separately from approved payroll hours', () => {
@@ -129,11 +129,41 @@ test('overnight PDF rows and night approval stay on the shift start date across 
   extension.nightDecision='APPROVED';
   report=app.reportRows()[0];
   assert.equal(report.totals.night,480);
-  assert.equal(report.totals.overtime,0);
+  assert.equal(report.totals.overtime,480);
   const html=app.renderReportEmployee(report,{start:date,end:date},'QA',true);
   assert.match(html,/6:00\s*AM \(\+1 day\)/);
   assert.equal(attendanceDetails(report.rows)[0].date,date);
   app.state.reportRange={start:nextDay,end:nextDay};
   assert.equal(app.reportRows()[0].rows[0].punches.length,0);
   assert.equal(app.reportRows()[0].totals.night,0);
+});
+
+test('PDF OT includes approved ND with ten minutes undertime and excludes pending or rejected ND', () => {
+  const app=appHarness(), fixture=reportFixture(1,2), date='2026-10-01';
+  const punches=fixture.rows[0].punches;
+  for(const punch of punches){
+    const time={1:['08:10','15:00'],2:['20:00','00:00']}[punch.segment][punch.slot==='IN'?0:1];
+    punch.timeUtc=shiftInstant(date,time,punch.segment===2&&punch.slot==='OUT');
+  }
+  const extension={userId:'worker',workDate:date,calculationKey:premiumCalculationKey(date,punches),overtimeDecision:'PENDING',nightDecision:'PENDING'};
+  Object.assign(app.state,{employees:[fixture.employee],reportRange:{start:date,end:date},
+    session:{today:date,user:{role:'admin'},settings:{holidays:[]}},adminData:{punches,extensions:[extension],overtime:[]}});
+  let report=app.reportRows()[0];
+  assert.deepEqual([report.totals.regular,report.totals.undertime,report.totals.overtime,report.totals.night,report.totals.pendingOvertime,report.totals.pendingNight],
+    [470,10,0,0,120,120]);
+  extension.nightDecision='APPROVED';
+  report=app.reportRows()[0];
+  assert.deepEqual([report.totals.regular,report.totals.undertime,report.totals.overtime,report.totals.night,report.totals.pendingOvertime,report.totals.pendingNight],
+    [470,10,120,120,0,0]);
+  const html=app.renderReportEmployee(report,{start:date,end:date},'QA',true);
+  assert.ok(html.includes('Approved OT incl. ND</span><strong>2h 00m'));
+  assert.ok(html.includes('Undertime</span><strong>0h 10m'));
+  assert.ok(html.includes('The ND column is included in OT total. ND never reduces undertime.'));
+  assert.ok(html.includes('<th>OT incl. ND</th>'));
+  extension.nightDecision='REJECTED';
+  assert.equal(app.reportRows()[0].totals.overtime,0);
+  extension.nightDecision='APPROVED';
+  punches[0].timeUtc=shiftInstant(date,'08:20');
+  assert.equal(app.reportRows()[0].totals.overtime,0);
+  assert.equal(app.reportRows()[0].totals.pendingOvertime,120);
 });

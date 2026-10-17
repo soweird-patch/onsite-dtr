@@ -553,7 +553,7 @@ test('admin interval saving and review allocate regular shortfall, remaining OT,
   for(const stage of ['OVERTIME','NIGHT']) await reviewExtension._handler(f.ctx,{
     token:f.token,id:extension._id,stage,decision:'APPROVED',calculationKey:extension.calculationKey
   });
-  assert.deepEqual(payrollDayTotals(date,active,extension),{regular:480,undertime:0,overtime:60,night:120});
+  assert.deepEqual(payrollDayTotals(date,active,extension),{regular:480,undertime:0,overtime:180,night:120});
   const revised = segments.map((segment,index)=>({...segment,
     inId:active.find(p=>p.segment===index+1&&p.slot==='IN')._id,
     outId:active.find(p=>p.segment===index+1&&p.slot==='OUT')._id
@@ -566,7 +566,7 @@ test('admin interval saving and review allocate regular shortfall, remaining OT,
   const current = [...f.tables.punches.values()].filter(p=>p.active);
   await assert.rejects(reviewExtension._handler(f.ctx,{token:f.token,id:extension._id,stage:'OVERTIME',decision:'APPROVED'}),/No remaining overtime/);
   await reviewExtension._handler(f.ctx,{token:f.token,id:extension._id,stage:'NIGHT',decision:'APPROVED'});
-  assert.deepEqual(payrollDayTotals(date,current,extension),{regular:480,undertime:0,overtime:0,night:120});
+  assert.deepEqual(payrollDayTotals(date,current,extension),{regular:480,undertime:0,overtime:120,night:120});
 });
 
 test('admin can create, correct, clear details, and reject attendance without a reason while retaining audits', async () => {
@@ -592,6 +592,32 @@ test('admin can create, correct, clear details, and reject attendance without a 
   const proof=await f.ctx.db.insert('punches',{userId,workDate:'2026-10-17',slot:'IN',method:'ONSITE',active:true,verification:'PENDING'});
   await verify._handler(f.ctx,{token:f.token,id:proof,verification:'REJECTED'});
   assert.equal((await f.ctx.db.get(proof)).verification,'REJECTED');
+});
+
+test('ND approval adds hours to OT total while a ten-minute regular shortfall remains', async () => {
+  const f=fixture(), date='2026-10-15';
+  const adminId=await f.addUser('Admin','admin'), userId=await f.addUser('Worker','employee');
+  await f.authorize(adminId);
+  const segments=[{timeIn:'08:10',timeOut:'15:00'},{timeIn:'20:00',timeOut:'00:00'}];
+  await saveAdminAttendanceDay._handler(f.ctx,{token:f.token,input:{employeeId:userId,workDate:date,expectedIds:[],segments}});
+  const active=[...f.tables.punches.values()].filter(p=>p.active), extension=[...f.tables.extensions.values()][0];
+  assert.ok(active.every(p=>p.workDate===date));
+  assert.deepEqual(payrollDayTotals(date,active,extension),{regular:470,undertime:10,overtime:0,night:0});
+  await assert.rejects(reviewExtension._handler(f.ctx,{token:f.token,id:extension._id,stage:'OVERTIME',decision:'APPROVED'}),/No remaining overtime/);
+  await reviewExtension._handler(f.ctx,{token:f.token,id:extension._id,stage:'NIGHT',decision:'APPROVED'});
+  assert.deepEqual(payrollDayTotals(date,active,extension),{regular:470,undertime:10,overtime:120,night:120});
+  await reviewExtension._handler(f.ctx,{token:f.token,id:extension._id,stage:'NIGHT',decision:'REJECTED'});
+  assert.deepEqual(payrollDayTotals(date,active,extension),{regular:470,undertime:10,overtime:0,night:0});
+  await reviewExtension._handler(f.ctx,{token:f.token,id:extension._id,stage:'NIGHT',decision:'APPROVED'});
+  const corrected=segments.map((segment,index)=>({...segment,
+    inId:active.find(p=>p.segment===index+1&&p.slot==='IN')._id,
+    outId:active.find(p=>p.segment===index+1&&p.slot==='OUT')._id
+  }));
+  corrected[0].timeIn='08:20';
+  await saveAdminAttendanceDay._handler(f.ctx,{token:f.token,input:{employeeId:userId,workDate:date,expectedIds:active.map(p=>p._id),segments:corrected}});
+  assert.equal(extension.nightDecision,'PENDING');
+  const current=[...f.tables.punches.values()].filter(p=>p.active);
+  assert.deepEqual(payrollDayTotals(date,current,extension),{regular:460,undertime:20,overtime:0,night:0});
 });
 
 test('employee clock-in enforces the 6 AM to 5 PM window, including both boundaries', async () => {
