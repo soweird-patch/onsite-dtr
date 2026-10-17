@@ -801,7 +801,7 @@ function renderBackfill() {
     <div class="manual-interval-head"><strong>${index === 0 ? 'First work interval' : `Return to work · interval ${index + 1}`}</strong>${index > 0 && !segment.inId && !segment.outId ? `<button class="link-button" type="button" data-action="remove-manual-interval" data-index="${index}">Remove</button>` : ''}</div>
     <div class="field-row"><div class="field"><label>Time In</label><input name="timeIn" type="time" value="${h(segment.timeIn)}" required></div><div class="field"><label>Time Out ${index === 0 ? '(optional until shift ends)' : ''}</label><input name="timeOut" type="time" value="${h(segment.timeOut)}" ${index > 0 ? 'required' : ''}></div></div>
     <div class="manual-options">${index > 0 ? `<label class="check-row"><input name="timeInNextDay" type="checkbox" ${segment.timeInNextDay ? 'checked' : ''}> Time In after midnight</label>` : '<input name="timeInNextDay" type="checkbox" hidden>'}<label class="check-row"><input name="timeOutNextDay" type="checkbox" ${segment.timeOutNextDay ? 'checked' : ''}> Time Out after midnight (by 6:00 AM)</label><label class="check-row"><input name="offsite" type="checkbox" ${segment.offsite ? 'checked' : ''}> Offsite / field work</label></div>
-    <div class="field"><label>Reason</label><textarea name="intervalReason" minlength="5" maxlength="300" ${!segment.inId ? 'required' : ''} placeholder="Reason for creating or adjusting this interval">${h(segment.reason || '')}</textarea></div><div class="field"><label>Field Assignment</label><textarea name="fieldAssignment" maxlength="300" placeholder="Client, location, or task for this interval (optional)">${h(segment.fieldAssignment || '')}</textarea></div>
+    <div class="field"><label>Reason (optional)</label><textarea name="intervalReason" maxlength="300" placeholder="Add a reason for this interval (optional)">${h(segment.reason || '')}</textarea></div><div class="field"><label>Field Assignment</label><textarea name="fieldAssignment" maxlength="300" placeholder="Client, location, or task for this interval (optional)">${h(segment.fieldAssignment || '')}</textarea></div>
     <div data-interval-hours="${index}" aria-live="polite">${intervalHoursMarkup(intervalHours[index])}</div>
     ${saved ? `<div class="manual-saved-proof">${[saved.inPunch, saved.outPunch].filter(Boolean).map(punch => `<span>${punch.slot === 'IN' ? 'In' : 'Out'}: ${h(punchSource(punch))} · ${h(punch.verification.toLowerCase())}${punch.hasSelfie ? ' · selfie' : ''}${mapLink(punch, 'Map ↗')}</span>`).join('')}</div><p class="tiny-label">Unchanged times keep the original selfie, GPS, and approval. Edited times become audited admin corrections.</p>` : ''}</section>`;
   }).join('');
@@ -1254,7 +1254,7 @@ document.addEventListener('click', async event => {
     }
     if (action === 'verify-approve' || action === 'verify-reject') {
       const verification = action === 'verify-approve' ? 'APPROVED' : 'REJECTED';
-      const reason = verification === 'REJECTED' ? window.prompt('Reason for rejection (at least 5 characters):') : '';
+      const reason = verification === 'REJECTED' ? window.prompt('Reason for rejection (optional):') : '';
       if (verification === 'REJECTED' && reason == null) return;
       const proofContext = state.modal?.kind === 'record-day'
         ? { userId: state.modal.punches[0]?.userId, employeeName: state.modal.employeeName, workDate: state.modal.workDate }

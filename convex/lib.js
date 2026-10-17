@@ -38,7 +38,7 @@ export function punchView(row, name) {
     accuracyM: row.accuracyM ?? null, distanceM: row.distanceM ?? null,
     hasSelfie: !!row.selfieId, note: row.note, verification: row.verification,
     assignmentType: row.assignmentType ?? null,
-    reason: row.reason ?? (row.method === 'ADMIN' ? row.note : '') ?? '',
+    reason: row.reason ?? row.note ?? '',
     fieldAssignment: row.fieldAssignment ?? '',
     rejectionReason: row.rejectionReason ?? null, createdBy: row.createdBy ?? null,
     reviewedBy: row.reviewedBy ?? null, reviewedAt: row.reviewedAt ?? null,

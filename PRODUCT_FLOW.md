@@ -69,7 +69,7 @@ Create/edit/disable employee; assign employee ID, schedule, at initial login ins
 
 ### D. Admin-created attendance / no-internet backfill
 
-1. Piliin ang employee at work date, ilagay ang AM In at/o PM Out, at **required reason** (hal. no signal sa field). Ang source ay laging **Created by admin** para hindi magmukhang GPS-verified employee punch.
+1. Piliin ang employee at work date, ilagay ang AM In at/o PM Out, at **optional reason** (hal. no signal sa field). Ang source ay laging **Created by admin** para hindi magmukhang GPS-verified employee punch.
 2. Para sa offsite backfill, ilagay ang aktuwal na In/Out at piliin kung next day ang Out. Awtomatikong iko-compute ang eligible overtime at Differential; hiwalay na aaprubahan ng admin. Hindi kailangan ng selfie/location para sa admin-created event.
 3. Malinaw na label: **Created by admin** sa employee view, admin list, at print/export. Itala ang creator, oras ng pag-create, reason, at history ng anumang edit.
 4. Kung may original employee punch sa parehong slot, huwag i-overwrite. Gumawa ng documented correction/replacement na may original record retained.
@@ -92,7 +92,7 @@ Create/edit/disable employee; assign employee ID, schedule, at initial login ins
 | Time Out bago makumpleto ang 8 actual working hours | **Undertime** = 480 minus actual working minutes. Time beyond 8 working hours is pending OT until 10:00 PM, including before 5:00 PM. Night differential stays fixed at 10:00 PM–6:00 AM. |
 | Walang punch matapos ang scheduled shift | **No record / possible absence**, para i-review ng admin. Hindi agad payroll-final kung may leave/holiday/exemption. |
 | Offsite proof | **Pending verification** hanggang approve/reject ng admin. |
-| Admin backfill | **Created by admin**, may required reason; walang selfie requirement. |
+| Admin backfill | **Created by admin**, may optional reason; walang selfie requirement. |
 | Duplicate tap / retry | Isang active punch bawat employee, work date, at slot; nirereject ang duplicate at puwedeng tingnan ang existing receipt sa history. |
 
 Ang oras sa regular, overtime, at Differential windows ay nasa [premium workflow](PREMIUM_FLOW.md). Kasama sa "Incoming Holidays" ng admin at employee ang published nationwide holidays sa 2026–2027. Ang regular at special non-working days ay no-work; ang special working day ay normal na scheduled day. Ang admin ay puwedeng magdagdag ng local/company holidays. Hindi bibilangin ang no-work day bilang missing attendance o late/undertime. Ang bagong proclamation, kasama ang 2027 Eid dates, ay nangangailangan ng calendar update. Hindi magko-compute ng sahod, pay rate, leave, holiday pay, o deduction ang DTR.

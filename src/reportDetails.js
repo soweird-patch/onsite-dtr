@@ -3,7 +3,7 @@ import { groupPunches } from '../rules.js';
 // Legacy notes are included so older field records also appear in PDF reports.
 export function attendanceDetails(rows) {
   const details = [];
-  const metadata = punch => ({ reason: punch?.reason || punch?.note || '',
+  const metadata = punch => ({ reason: punch?.reason ?? punch?.note ?? '',
     fieldAssignment: punch?.fieldAssignment || '' });
   for (const row of rows) {
     for (const { inPunch, outPunch } of groupPunches(row.punches)) {

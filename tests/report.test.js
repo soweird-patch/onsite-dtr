@@ -46,6 +46,9 @@ test('report renders every interval detail, escapes text, and includes open and 
   ] }]);
   assert.equal(legacy[0].reason, 'Legacy field note');
   assert.equal(legacy[0].outUtc, undefined);
+  const cleared=attendanceDetails([{date:'2026-10-01',punches:[{slot:'IN',reason:'',note:'Previous reason',fieldAssignment:'Client A'}]}]);
+  assert.equal(cleared[0].reason,'');
+  assert.equal(cleared[0].fieldAssignment,'Client A');
 });
 
 test('actual report totals use current approvals and exclude old manual OT grants', () => {

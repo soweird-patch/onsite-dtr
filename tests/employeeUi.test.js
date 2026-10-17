@@ -27,6 +27,10 @@ test('admin interval editor shows regular top-up, OT, and night-only allocations
     {timeIn:'22:00',timeOut:'00:00',timeOutNextDay:true,reason:'Night assignment'}
   ]};
   const html=app.renderBackfill();
+  assert.ok(html.includes('Reason (optional)'));
+  const reasonFields=html.match(/<textarea name="intervalReason"[^>]*>/g);
+  assert.equal(reasonFields.length,3);
+  assert.ok(reasonFields.every(field=>!/(required|minlength)/.test(field)));
   assert.equal((html.match(/data-interval-hours=/g)||[]).length,3);
   assert.ok(html.includes('Fills regular shortage</span><strong>2h 00m'));
   assert.ok(html.includes('Pending OT</span><strong>1h 00m'));

@@ -344,7 +344,7 @@ export const backfill = mutation({ args: { ...tokenArg, input: v.any() }, handle
   if (!target || target.role !== 'employee') throw new Error('Employee not found.');
   if (!safeDate(input.workDate)) throw new Error('Valid work date is required.');
   const reason = String(input.reason || '').trim();
-  if (reason.length < 5 || reason.length > 300) throw new Error('Reason must have 5–300 characters.');
+  if (reason.length > 300) throw new Error('Reason must have at most 300 characters.');
   const entries = [];
   if (input.timeIn) entries.push({ slot: 'IN', time: localTimeToUtc(input.workDate, input.timeIn) });
   if (input.timeOut) {
@@ -436,12 +436,6 @@ export const saveAdminAttendanceDay = mutation({ args: { ...tokenArg, input: v.a
       metadataProvided: segment.reason !== undefined || segment.fieldAssignment !== undefined };
     for (const [slot, timeUtc, id] of [['IN', inUtc, segment.inId], ['OUT', outUtc, segment.outId]]) {
       if (!timeUtc) continue;
-      const old = oldByKey.get(`${number}|${slot}`);
-      const sameTime = old && localDateTime(old.timeUtc, timezone).date === localDateTime(timeUtc, timezone).date &&
-        localDateTime(old.timeUtc, timezone).time === localDateTime(timeUtc, timezone).time;
-      if ((!sameTime || metadata.metadataProvided) && intervalReason.length < 5 &&
-          (!sameTime || intervalReason !== (old.reason ?? (old.method === 'ADMIN' ? old.note : '') ?? '')))
-        throw new Error(`Interval ${number}: Reason must have 5–300 characters for an adjustment.`);
       entries.push({ number, slot, timeUtc, id: id || null, ...metadata });
     }
     previousOut = outUtc;
@@ -492,7 +486,7 @@ export const verify = mutation({ args: { ...tokenArg, id: v.string(), verificati
   const admin = await authUser(ctx, args.token, 'admin');
   if (!['APPROVED', 'REJECTED'].includes(args.verification)) throw new Error('Choose Approve or Reject.');
   const reason = String(args.reason || '').trim();
-  if (args.verification === 'REJECTED' && reason.length < 5) throw new Error('A rejection reason is required.');
+  if (reason.length > 300) throw new Error('Reason must have at most 300 characters.');
   const id = ctx.db.normalizeId('punches', args.id);
   const punch = id && await ctx.db.get(id);
   if (!punch?.active) throw new Error('Punch not found.');

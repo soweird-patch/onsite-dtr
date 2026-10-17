@@ -474,6 +474,31 @@ test('admin interval saving and review allocate regular shortfall, remaining OT,
   assert.deepEqual(payrollDayTotals(date,current,extension),{regular:480,undertime:0,overtime:0,night:120});
 });
 
+test('admin can create, correct, clear details, and reject attendance without a reason while retaining audits', async () => {
+  const f=fixture(), date='2026-10-15';
+  const adminId=await f.addUser('Admin','admin'), userId=await f.addUser('Worker','employee');
+  await f.authorize(adminId);
+  const save=segments=>saveAdminAttendanceDay._handler(f.ctx,{token:f.token,input:{employeeId:userId,workDate:date,
+    expectedIds:[...f.tables.punches.values()].filter(p=>p.active&&p.workDate===date).map(p=>p._id),segments}});
+  await save([{timeIn:'08:00',timeOut:'17:00'}]);
+  let active=[...f.tables.punches.values()].filter(p=>p.active);
+  assert.ok(active.every(p=>p.reason===''));
+  const originalOut=active.find(p=>p.slot==='OUT');
+  await save([{inId:active.find(p=>p.slot==='IN')._id,outId:originalOut._id,timeIn:'08:00',timeOut:'18:00'}]);
+  assert.equal(originalOut.active,false);
+  assert.ok([...f.tables.audit.values()].some(a=>a.action==='punch_replaced'&&a.actorId===adminId&&a.details.reason===''));
+  active=[...f.tables.punches.values()].filter(p=>p.active);
+  const segment={inId:active.find(p=>p.slot==='IN')._id,outId:active.find(p=>p.slot==='OUT')._id,timeIn:'08:00',timeOut:'18:00'};
+  await save([{...segment,reason:'ok',fieldAssignment:'Client site'}]);
+  await save([{...segment,reason:'',fieldAssignment:'Client site'}]);
+  assert.ok(active.every(p=>p.reason===''&&p.fieldAssignment==='Client site'));
+  assert.ok([...f.tables.audit.values()].some(a=>a.action==='interval_details_update'&&a.details.before.reason==='ok'&&a.details.after.reason===''));
+  await backfill._handler(f.ctx,{token:f.token,input:{employeeId:userId,workDate:'2026-10-16',timeIn:'08:00',timeOut:'17:00'}});
+  const proof=await f.ctx.db.insert('punches',{userId,workDate:'2026-10-17',slot:'IN',method:'ONSITE',active:true,verification:'PENDING'});
+  await verify._handler(f.ctx,{token:f.token,id:proof,verification:'REJECTED'});
+  assert.equal((await f.ctx.db.get(proof)).verification,'REJECTED');
+});
+
 test('employee clock-in enforces the 6 AM to 4 PM window, including both boundaries', async () => {
   const f = fixture(), date = '2026-10-15', userId = await f.addUser('Worker','employee');
   await f.authorize(userId);
