@@ -903,12 +903,12 @@ function renderReportEmployee({ employee, rows, totals }, range, generated, visi
   const details = attendanceDetails(rows);
   const detailTable = details.length ? `<h3 class="report-details-title">Reasons and Field Assignments</h3>
     <div class="table-wrap report-details-wrap"><table class="table report-details"><thead><tr><th>Date</th><th>Time In</th><th>Time Out</th><th>Reason</th><th>Field Assignment</th></tr></thead><tbody>${details.map(item => `<tr>
-      <td data-label="Date">${h(reportDate(item.date))}</td><td data-label="Time In">${h(formatShiftTime(item.inUtc, item.date))}</td>
-      <td data-label="Time Out">${h(formatShiftTime(item.outUtc, item.date))}</td><td data-label="Reason">${h(item.reason || '—')}</td>
+      <td data-label="Date">${h(reportDate(item.date))}</td><td data-label="Time In">${h(formatTime(item.inUtc))}</td>
+      <td data-label="Time Out">${h(formatTime(item.outUtc))}</td><td data-label="Reason">${h(item.reason || '—')}</td>
       <td data-label="Field Assignment">${h(item.fieldAssignment || '—')}</td></tr>`).join('')}</tbody></table></div>` : '';
   const body = rows.map(row => `<tr><td data-label="Date">${h(reportDate(row.date))}</td>
-    <td data-label="Time In">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatShiftTime(group.inPunch?.timeUtc, row.date))}</div>`).join('') || '—'}</td>
-    <td data-label="Time Out">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatShiftTime(group.outPunch?.timeUtc, row.date))}</div>`).join('') || '—'}</td>
+    <td data-label="Time In">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatTime(group.inPunch?.timeUtc))}</div>`).join('') || '—'}</td>
+    <td data-label="Time Out">${groupPunches(row.punches).map((group, index) => `<div>${index + 1}. ${h(formatTime(group.outPunch?.timeUtc))}</div>`).join('') || '—'}</td>
     <td data-label="Source">${h([...new Set(row.punches.map(punchSource))].join(' / ') || '—')}</td>
     <td data-label="Regular">${h(formatMinutes(row.regular))}</td><td data-label="Undertime">${h(formatMinutes(row.undertime))}</td>
     <td data-label="Overtime">${h(formatMinutes(row.overtime))}${row.pendingOvertime ? `<small class="report-pending">Pending OT: ${h(formatMinutes(row.pendingOvertime))}</small>` : ''}</td><td data-label="Night differential">${h(formatMinutes(row.night))}${row.pendingNight ? `<small class="report-pending">Pending ND: ${h(formatMinutes(row.pendingNight))}</small>` : ''}</td></tr>`).join('');

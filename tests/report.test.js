@@ -135,7 +135,8 @@ test('overnight PDF rows and night approval stay on the shift start date across 
   assert.equal(report.totals.overtime,480);
   const html=app.renderReportEmployee(report,{start:date,end:date},'QA',true);
   assert.ok(html.includes('data-label="Date">Sunday 10/25/2026</td>'));
-  assert.match(html,/6:00\s*AM \(\+1 day\)/);
+  assert.match(html,/6:00\s*AM/);
+  assert.ok(!html.includes('(+1 day)'));
   assert.equal(attendanceDetails(report.rows)[0].date,date);
   app.state.reportRange={start:nextDay,end:nextDay};
   assert.equal(app.reportRows()[0].rows[0].punches.length,0);
