@@ -30,7 +30,7 @@ test('Proceed stays unavailable without a photo, valid GPS, or while work is in 
   c.selfie = 'photo'; assert.equal(app.captureReady(), false);
   c.location = { accuracyM: 101 }; assert.equal(app.captureReady(), false);
   c.location.accuracyM = 100; assert.equal(app.captureReady(), true);
-  for (const flag of ['photoProcessing', 'locationPending', 'locationError', 'submitting']) {
+  for (const flag of ['cameraOpen', 'photoProcessing', 'locationPending', 'locationError', 'submitting']) {
     c[flag] = flag === 'locationError' ? 'Location denied' : true;
     assert.equal(app.captureReady(), false, flag);
     assert.match(app.renderCapture(), /data-action="submit-punch" disabled/);

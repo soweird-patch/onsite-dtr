@@ -1,6 +1,7 @@
 import { ConvexClient, ConvexHttpClient } from 'convex/browser';
 import { api as functions } from '../convex/_generated/api.js';
 import { attendanceDetails } from './reportDetails.js';
+import { openFrontCamera, closeFrontCamera } from './selfieCamera.js';
 import { groupPunches, holidayFor, isPayrollDayReady, isPayrollReady, isScheduledWorkday,
   expectedTimeOut, localDateTime, payrollDayTotals, premiumCalculationKey, punchProvenance, resolveWorkInterval, safeDate, shiftInstant, workBreakdown, workBreakdownIntervals, workIntervalBreakdowns } from '../rules.js';
 
@@ -559,6 +560,7 @@ function backfillInputFromForm(form) {
   return input;
 }
 async function go(section) {
+  if (section !== 'capture') closeFrontCamera();
   state.section = section; state.modal = null; state.message = '';
   if (section === 'report') { state.reportRange = null; state.reportEmployeeId = null; }
   if (section === 'backfill') { state.backfillLoadId++; state.backfillLoading = false; state.backfillDraft = blankBackfillDraft(); }
@@ -618,8 +620,8 @@ function renderEmployeeHome() {
     inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc
   })));
   return `<div class="hero"><p class="eyebrow">${h(prettyDate(today()))}</p><h1>${greeting()}, ${h(user.name.split(' ')[0])}</h1><p>Here's your attendance at a glance.</p></div>
-    <div class="grid"><section class="card wide employee-attendance-card"><div class="employee-attendance-head"><div class="card-title"><span class="symbol">◷</span> ${state.employeeData.openShift ? 'OVERNIGHT SHIFT' : "TODAY'S ATTENDANCE"}</div><button class="attendance-view-button" data-nav="history" aria-label="View attendance history" title="View attendance history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.8"></circle></svg></button></div><div class="pill ${statusOf(inPunch,outPunch) === 'Present' ? '' : 'pending'}">${h(holiday && !inPunch && !outPunch ? `Holiday · ${holiday.name}` : statusOf(inPunch,outPunch))}</div><p class="card-sub">Work date: ${h(prettyDate(workDate))}</p>${expectedOut ? `<p class="card-sub">Expected Time Out for 8 working hours: <strong>${h(formatTime(expectedOut))}</strong>${outPunch ? '' : ' · assumes no further unpaid breaks'}</p>` : inPunch ? '<p class="card-sub">The remaining regular hours cannot be completed before 10:00 PM. Night differential is recorded separately.</p>' : '<p class="card-sub">Time In is available from 6:00 AM to 5:00 PM.</p>'}<div class="punch-line"><span>Time In</span><strong class="${inPunch ? '' : 'missing'}">${h(formatTime(inPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(inPunch)} ${h(locationText(inPunch))} ${inPunch ? mapLink(inPunch, 'Open Time In map ↗') : ''}</div><div class="punch-line"><span>Time Out</span><strong class="${outPunch ? '' : 'missing'}">${h(formatTime(outPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(outPunch)} ${h(locationText(outPunch))} ${outPunch ? mapLink(outPunch, 'Open Time Out map ↗') : ''}</div>${extension && outPunch ? `<p class="card-sub">OT total (remaining OT + ND): ${h(formatMinutes(extra.totalOvertimeCandidateMinutes))}. Remaining OT ${h(formatMinutes(extra.overtimeCandidateMinutes))} (${h(extension.overtimeDecision.toLowerCase())}) · Night differential ${h(formatMinutes(extra.nightCandidateMinutes))} (${h(extra.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}).</p>` : ''}${action ? `<div class="card-actions"><button class="btn auto-punch-button" data-action="capture-auto" data-slot="${action}"><span aria-hidden="true">◎</span> ${action === 'IN' ? 'Time In' : 'Time Out'}</button></div>` : ''}${action ? `<div class="punch-location-status ready"><span>GPS automatically marks this punch as <strong>Onsite</strong> inside the site pin or <strong>Offsite</strong> outside it.</span></div>` : ''}</section>
-    <section class="card"><div class="card-title"><span class="symbol">▤</span> CURRENT CUTOFF</div><div class="card-sub">${h(dateSpan(current))}</div><div class="metric-row"><div class="metric-cell"><div class="metric green">${days.size}</div><span class="label">Days with Time In</span></div><div class="metric-cell"><div class="metric amber">${late}</div><span class="label">Late minutes</span></div></div><p class="card-sub">Undertime: ${h(formatMinutes(undertime))}</p><button class="link-button" data-nav="history">View cutoff details ›</button></section>
+    <div class="grid employee-home-grid"><section class="card wide employee-attendance-card"><div class="employee-attendance-head"><div class="card-title"><span class="symbol">◷</span> ${state.employeeData.openShift ? 'OVERNIGHT SHIFT' : "TODAY'S ATTENDANCE"}</div><button class="attendance-view-button" data-nav="history" aria-label="View attendance history" title="View attendance history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.8"></circle></svg></button></div><div class="pill ${statusOf(inPunch,outPunch) === 'Present' ? '' : 'pending'}">${h(holiday && !inPunch && !outPunch ? `Holiday · ${holiday.name}` : statusOf(inPunch,outPunch))}</div><p class="card-sub">Work date: ${h(prettyDate(workDate))}</p>${expectedOut ? `<p class="card-sub">Expected Time Out for 8 working hours: <strong>${h(formatTime(expectedOut))}</strong>${outPunch ? '' : ' · assumes no further unpaid breaks'}</p>` : inPunch ? '<p class="card-sub">The remaining regular hours cannot be completed before 10:00 PM. Night differential is recorded separately.</p>' : '<p class="card-sub">Time In is available from 6:00 AM to 5:00 PM.</p>'}<div class="punch-line"><span>Time In</span><strong class="${inPunch ? '' : 'missing'}">${h(formatTime(inPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(inPunch)} ${h(locationText(inPunch))} ${inPunch ? mapLink(inPunch, 'Open Time In map ↗') : ''}</div><div class="punch-line"><span>Time Out</span><strong class="${outPunch ? '' : 'missing'}">${h(formatTime(outPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(outPunch)} ${h(locationText(outPunch))} ${outPunch ? mapLink(outPunch, 'Open Time Out map ↗') : ''}</div>${extension && outPunch ? `<p class="card-sub">OT total (remaining OT + ND): ${h(formatMinutes(extra.totalOvertimeCandidateMinutes))}. Remaining OT ${h(formatMinutes(extra.overtimeCandidateMinutes))} (${h(extension.overtimeDecision.toLowerCase())}) · Night differential ${h(formatMinutes(extra.nightCandidateMinutes))} (${h(extra.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}).</p>` : ''}${action ? `<div class="card-actions"><button class="btn auto-punch-button" data-action="capture-auto" data-slot="${action}"><span aria-hidden="true">◎</span> ${action === 'IN' ? 'Time In' : 'Time Out'}</button></div>` : ''}${action ? `<div class="punch-location-status ready"><span>GPS automatically marks this punch as <strong>Onsite</strong> inside the site pin or <strong>Offsite</strong> outside it.</span></div>` : ''}</section>
+    <section class="card employee-cutoff-card"><div class="card-title"><span class="symbol">▤</span> CURRENT CUTOFF</div><div class="card-sub">${h(dateSpan(current))}</div><div class="metric-row"><div class="metric-cell"><div class="metric green">${days.size}</div><span class="label">Days with Time In</span></div><div class="metric-cell"><div class="metric amber">${late}</div><span class="label">Late minutes</span></div></div><p class="card-sub">Undertime: ${h(formatMinutes(undertime))}</p><button class="link-button" data-nav="history">View cutoff details ›</button></section>
     ${recentAttendanceFolders(punches)}${renderHolidayCard()}</div>
     ${inPunch && !outPunch && extra.overtimeCandidateMinutes ? `<div style="height:16px"></div><div class="notice">Current estimated overtime beyond 8 actual working hours: <strong>${h(formatMinutes(extra.overtimeCandidateMinutes))}</strong>. The final OT request is created automatically when Time Out is recorded.</div>` : ''}`;
 }
@@ -1088,31 +1090,31 @@ function newCapture(slot, location = null) {
   return { slot, userId: state.session.user.id, workDate: activeWorkDate(),
     method: detectedPunchMethod(location, activeExtension()), location,
     selfie: null, selfieBytes: null, previewAt: null, note: getTodayPunch('IN')?.note || '',
-    photoProcessing: false, locationPending: false, locationError: '', submitting: false };
+    cameraOpen: false, photoProcessing: false, locationPending: false, locationError: '', submitting: false };
 }
 function captureReady(c = state.capture) {
   return !!(c?.selfie && c.location && c.location.accuracyM <= config().maxAccuracyM &&
-    !c.photoProcessing && !c.locationPending && !c.locationError && !c.submitting);
+    !c.cameraOpen && !c.photoProcessing && !c.locationPending && !c.locationError && !c.submitting);
 }
 function clearCapture() {
+  closeFrontCamera();
   state.capture = null;
-  const input = document.getElementById('selfie-file');
-  if (input) { input.value = ''; input.captureDraft = null; }
 }
-function openDeviceCamera() {
+async function openDeviceCamera() {
   const c = state.capture;
-  if (!c || c.photoProcessing || c.submitting) return;
-  // Keep this input outside the rendered app so GPS/live updates cannot detach
-  // it while the operating system's camera is open.
-  let input = document.getElementById('selfie-file');
-  if (!input) {
-    input = document.createElement('input');
-    input.id = 'selfie-file'; input.type = 'file'; input.accept = 'image/*';
-    input.setAttribute('capture', 'user'); input.hidden = true;
-    document.body.append(input);
+  if (!c || c.cameraOpen || c.photoProcessing || c.submitting) return;
+  c.cameraOpen = true;
+  renderView();
+  try {
+    const canvas = await openFrontCamera();
+    if (!canvas || state.capture !== c || state.session?.user.id !== c.userId) return;
+    c.cameraOpen = false;
+    await saveSelfiePhoto(canvas, c);
+    if (state.capture === c && state.section === 'capture') window.scrollTo(0, 0);
+  } finally {
+    c.cameraOpen = false;
+    if (state.capture === c && state.section === 'capture') renderView();
   }
-  input.value = ''; input.captureDraft = c;
-  input.click();
 }
 function beginDeviceCapture(slot, location = null) {
   if (state.capture?.submitting) return;
@@ -1122,12 +1124,12 @@ function beginDeviceCapture(slot, location = null) {
   if (inPunch && outPunch) throw new Error('Today’s Time In and Time Out are already complete.');
   if (slot !== (inPunch ? 'OUT' : 'IN')) throw new Error('Attendance changed. Open the time clock again.');
   closeModal();
+  closeFrontCamera();
   state.capture = newCapture(slot, location); state.section = 'capture'; state.message = '';
   render();
   window.scrollTo(0, 0);
-  // This must stay synchronous with the employee's click to open the native
-  // camera. Location requests start after the camera returns a photo.
-  openDeviceCamera();
+  // Open the front camera immediately; GPS starts after the employee takes the photo.
+  return openDeviceCamera();
 }
 async function refreshCaptureLocation(c = state.capture) {
   if (!c) return;
@@ -1167,24 +1169,17 @@ async function compressedJpeg(canvas, targetBytes, initialQuality = .78) {
   if (blob.size > 750_000) throw new Error('The image is still too large after compression. Try another photo.');
   return { dataUrl: await blobDataUrl(blob), bytes: blob.size };
 }
-async function fileSelfie(file, c = state.capture) {
-  if (!file || !c || state.capture !== c || c.photoProcessing || c.submitting) return;
-  if (!file.type.startsWith('image/') || file.size > 15_000_000) throw new Error('Choose an image from the device camera under 15 MB.');
+async function saveSelfiePhoto(canvas, c = state.capture) {
+  if (!canvas || !c || state.capture !== c || c.photoProcessing || c.submitting) return;
   c.photoProcessing = true;
   void refreshCaptureLocation(c);
-  let bitmap;
   try {
-    bitmap = await createImageBitmap(file);
-    const canvas = document.createElement('canvas');
-    const scale = Math.min(1, 900 / Math.max(bitmap.width, bitmap.height));
-    canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale);
-    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
     const compressed = await compressedJpeg(canvas, 220_000, .78);
     if (state.capture !== c) return;
     c.selfie = compressed.dataUrl; c.selfieBytes = compressed.bytes;
     c.previewAt = new Date().toISOString();
   } finally {
-    bitmap?.close?.(); c.photoProcessing = false;
+    c.photoProcessing = false;
     if (state.capture === c && state.section === 'capture') renderView();
   }
 }
@@ -1261,7 +1256,7 @@ document.addEventListener('click', async event => {
     if (node.dataset.nav) return await go(node.dataset.nav);
     if (action === 'auth-login' || action === 'auth-signup') { state.authMode = action === 'auth-signup' ? 'signup' : 'login'; state.message = ''; return renderLogin(); }
     if (action === 'logout') { await api('/api/logout', { method: 'POST', body: '{}' }); clearCapture(); state.session = null; state.section = 'home'; state.message = ''; await loadSignupStatus(); return render(); }
-    if (action === 'capture-auto') return beginDeviceCapture(node.dataset.slot);
+    if (action === 'capture-auto') return await beginDeviceCapture(node.dataset.slot);
     if (action === 'continue-offsite') {
       if (!navigator.onLine) throw new Error('Connect to the internet before continuing overtime.');
       const location = await geo();
@@ -1269,7 +1264,7 @@ document.addEventListener('click', async event => {
       await loadEmployee(currentRange()); renderView();
       return flash('Offsite continuation recorded. Time Out with selfie and GPS when finished; extra hours need admin approval.', 'success');
     }
-    if (action === 'arrival-time-in') return beginDeviceCapture('IN', state.modal.location);
+    if (action === 'arrival-time-in') return await beginDeviceCapture('IN', state.modal.location);
     if (action === 'modal-close') return closeModal();
     if (action === 'edit-profile') return showModal({ kind: 'edit-profile' });
     if (action === 'update-app') return showModal({ kind: 'update-app' });
@@ -1284,7 +1279,7 @@ document.addEventListener('click', async event => {
       return;
     }
     if (action === 'location' && !state.capture?.submitting) return await refreshCaptureLocation();
-    if (action === 'capture-photo') return openDeviceCamera();
+    if (action === 'capture-photo') return await openDeviceCamera();
     if (action === 'capture-cancel' && !state.capture?.submitting) { clearCapture(); return await go('home'); }
     if (action === 'submit-punch') return await submitPunch();
     if (action === 'cutoff-prev' || action === 'cutoff-next') {
@@ -1431,11 +1426,6 @@ document.addEventListener('change', async event => {
     if (event.target.closest('.manual-interval')) updateIntervalPreviews(event.target.closest('form'));
     if (event.target.id === 'payroll-month') return syncPayrollEditor(true);
     if (event.target.id === 'cutoff-first-start' || event.target.id === 'cutoff-second-start') return syncPayrollEditor();
-    if (event.target.id === 'selfie-file') {
-      const file = event.target.files[0], capture = event.target.captureDraft;
-      event.target.value = '';
-      return await fileSelfie(file, capture);
-    }
     if (event.target.id === 'signup-photo') {
       state.signupPhoto = await profileImageData(event.target.files[0]);
       const preview = document.getElementById('signup-photo-preview');
@@ -1606,7 +1596,9 @@ async function resumeAttendance() {
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') void resumeAttendance();
+  else closeFrontCamera();
 });
+window.addEventListener('pagehide', closeFrontCamera);
 setInterval(() => {
   if (!state.session || document.visibilityState !== 'visible') return;
   if (new Date().toLocaleDateString('en-CA', { timeZone }) !== today()) void resumeAttendance();

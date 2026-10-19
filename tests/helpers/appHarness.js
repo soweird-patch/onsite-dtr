@@ -10,6 +10,7 @@ export function appHarness() {
     .replace('import.meta.env.VITE_CONVEX_URL', 'null')
     .split('\nawait loadBranding();')[0];
   const context = vm.createContext({ ...rules, attendanceDetails, functions: {}, console,
+    openFrontCamera: async () => null, closeFrontCamera() {},
     URL, URLSearchParams, Intl, Date, setInterval() {}, clearTimeout() {}, setTimeout() {},
     document: { getElementById() { return {}; }, addEventListener() {} },
     window: { addEventListener() {}, matchMedia() { return { matches: false }; } },

@@ -4,7 +4,7 @@ The DTR records hours for payroll review; it does not calculate pay rates or ded
 
 ## Employee time clock
 
-Tap **Time In** or **Time Out** to open the device camera directly. Take a photo and accept it in the device camera, then review the photo, work date, time preview, and onsite/offsite status. **Retake photo** replaces the picture; canceling a retake keeps the existing picture. **Proceed** becomes available after the photo and GPS check are ready. It refreshes GPS and uploads the proof with the punch, then confirms the official time recorded by Convex. Canceling before Proceed does not save attendance. Failed uploads keep the photo for another attempt, and repeated taps cannot submit a second punch while a save is in progress.
+Tap **Time In** or **Time Out** to open the front camera directly in the app. Allow camera access, tap **Take photo**, then review the photo, work date, time preview, and onsite/offsite status. The camera request requires the front lens; if it is unavailable or permission is denied, the screen explains how to retry. **Retake photo** replaces the picture; canceling a retake keeps the existing picture. **Proceed** becomes available after the photo and GPS check are ready. It refreshes GPS and uploads the proof with the punch, then confirms the official time recorded by Convex. Canceling before Proceed does not save attendance. Failed uploads keep the photo for another attempt, and repeated taps cannot submit a second punch while a save is in progress. The camera stops after taking a photo, canceling, or leaving the app.
 
 ## Actual working hours
 
