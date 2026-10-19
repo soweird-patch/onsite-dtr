@@ -32,7 +32,7 @@ const state = {
   employees: [], adminData: { punches: [], extensions: [], overtime: [] }, historyRange: null,
   adminRange: null, reportRange: null, reportEmployeeId: null, capture: null,
   backfillDraft: null, backfillLoadId: 0, backfillLoading: false,
-  cameraStream: null, sitePromptedDate: null, onsiteAccess: null, installPrompt: null, installDismissed: false, modal: null, auditItems: [],
+  sitePromptedDate: null, onsiteAccess: null, installPrompt: null, installDismissed: false, modal: null, auditItems: [],
   message: '', messageType: 'notice'
 };
 
@@ -559,7 +559,7 @@ function backfillInputFromForm(form) {
   return input;
 }
 async function go(section) {
-  stopCamera(); state.section = section; state.modal = null; state.message = '';
+  state.section = section; state.modal = null; state.message = '';
   if (section === 'report') { state.reportRange = null; state.reportEmployeeId = null; }
   if (section === 'backfill') { state.backfillLoadId++; state.backfillLoading = false; state.backfillDraft = blankBackfillDraft(); }
   try {
@@ -666,24 +666,26 @@ function renderHistory() {
 function renderCapture() {
   const inPunch = getTodayPunch('IN'), outPunch = getTodayPunch('OUT');
   if (inPunch && outPunch) {
-    state.capture = null;
+    clearCapture();
     const hours = premiumBreakdown(activeWorkDate(), inPunch, outPunch, activeExtension());
     return `<div class="section-head"><div><p class="eyebrow">TIME CLOCK</p><h1 class="section-title">Attendance complete</h1><p>${h(prettyDate(activeWorkDate()))}</p></div></div><section class="card clock-complete"><div class="clock-complete-mark" aria-hidden="true">✓</div><span class="pill">Completed</span><h2>Your attendance is already recorded</h2><p>Time In and Time Out for this workday are complete. Another punch cannot be submitted.</p><div class="clock-complete-times"><div><span>TIME IN</span><strong>${h(formatTime(inPunch.timeUtc))}</strong><small>${h(punchSource(inPunch))}</small>${mapLink(inPunch, 'View Time In map ↗')}</div><div><span>TIME OUT</span><strong>${h(formatTime(outPunch.timeUtc))}</strong><small>${h(punchSource(outPunch))}</small>${mapLink(outPunch, 'View Time Out map ↗')}</div></div><div class="clock-complete-summary"><span>Regular hours</span><strong>${h(formatMinutes(hours.regularMinutes))}</strong></div><div class="card-actions"><button class="btn secondary" data-nav="home">Back to home</button><button class="btn ghost" data-nav="history">View attendance records</button></div></section>`;
   }
   const holiday = holidayFor(activeWorkDate(), config().holidays);
   if (holiday) return `<div class="section-head"><div><p class="eyebrow">TIME CLOCK</p><h1 class="section-title">No work today</h1><p>${h(prettyDate(today()))} · ${h(holiday.name)}</p></div></div><div class="notice">This date is marked as a holiday. Ask an administrator to record exceptional work.</div><button class="btn secondary" data-nav="home">Back to home</button>`;
-  const extension = activeExtension();
-  const c = state.capture || { method: 'OFFSITE', slot: getTodayPunch('IN') ? 'OUT' : 'IN',
-    location: null, selfie: null, note: extension ? (getTodayPunch('IN')?.note || '') : '' };
+  const c = state.capture || newCapture(getTodayPunch('IN') ? 'OUT' : 'IN');
   state.capture = c;
-  const site = config();
-  const distance = c.location && site.configured ? Math.round(haversine(c.location.latitude, c.location.longitude, site.siteLat, site.siteLng)) : null;
-  c.method = detectedPunchMethod(c.location, extension);
+  const site = config(), label = c.slot === 'IN' ? 'Time In' : 'Time Out';
   const accurate = c.location && c.location.accuracyM <= site.maxAccuracyM;
-  return `<div class="section-head"><div><p class="eyebrow">${c.method === 'ONSITE' ? 'ONSITE DETECTED' : 'OFFSITE DETECTED'}</p><h1 class="section-title">${c.slot === 'IN' ? 'Time In' : 'Time Out'}</h1></div></div><div class="split"><div class="card"><div class="card-title"><span class="symbol">◎</span> AUTOMATIC GPS CHECK</div>${c.slot === 'OUT' ? '<p class="notice">Work beyond 8 actual working hours until 10:00 PM is submitted for OT approval. Night differential is fixed at 10:00 PM–6:00 AM and reviewed separately.</p>' : ''}${c.method === 'OFFSITE' ? `<div class="field"><label for="capture-note">Offsite assignment note (optional)</label><input id="capture-note" maxlength="300" placeholder="e.g. Client visit at Quezon City" value="${h(c.note)}"></div>` : ''}
-    <div class="map-card">${c.location ? `<strong>${c.method === 'ONSITE' ? h(site.siteName) : 'Offsite / field location'}</strong><small>GPS accuracy ±${Math.round(c.location.accuracyM)} m${distance !== null ? ` · ${distance} m from site pin` : ''}</small>${mapLink(c.location)}` : '<span class="muted">Capturing device location…</span>'}</div>${c.location && !accurate ? `<div class="notice warn">GPS accuracy is ±${Math.round(c.location.accuracyM)} m. Move near a window or outdoors, then <button class="link-button" data-action="location">retry GPS</button>.</div>` : ''}
-    <div class="divider"></div><button class="btn block" data-action="submit-punch" ${!c.location || !c.selfie || !accurate ? 'disabled' : ''}>Upload &amp; Record ${c.slot === 'IN' ? 'Time In' : 'Time Out'}</button><p class="tiny-label">Onsite or Offsite is determined automatically from the saved site pin. Your compressed selfie and GPS map location are uploaded together.</p></div>
-    <div class="card"><div class="card-title"><span class="symbol">▣</span> SELFIE PROOF</div><div class="camera-box" id="camera-box">${c.selfie ? `<img src="${c.selfie}" alt="Captured selfie preview">` : '<div class="camera-placeholder"><div class="symbol">◉</div><p>Take a clear selfie for this punch.</p></div>'}</div><div class="capture-actions"><button class="btn secondary" data-action="camera-start">Open camera</button><button class="btn secondary hidden" id="camera-snap" data-action="camera-snap">Take selfie</button><label class="btn ghost" for="selfie-file">Device camera fallback</label><input id="selfie-file" type="file" accept="image/*" capture="user" class="hidden"></div><p class="tiny-label">Selfie and GPS are required for both onsite and offsite employee punches.${c.selfieBytes ? ` Compressed image: ${h(Math.max(1, Math.round(c.selfieBytes / 1024)))} KB.` : ''}</p></div></div>`;
+  const ready = captureReady(c);
+  const locationLabel = c.location ? (c.method === 'ONSITE' ? 'Onsite' : 'Offsite') : 'Waiting for location';
+  return `<div class="section-head"><div><p class="eyebrow">ATTENDANCE</p><h1 class="section-title">${h(label)}</h1><p>${c.selfie ? 'Review your photo and details before recording.' : 'Take a clear photo to continue.'}</p></div></div>
+    <section class="card capture-review"><div class="capture-review-grid"><div class="capture-photo-panel"><div class="card-title"><span class="symbol">▣</span> PHOTO PREVIEW</div><div class="camera-box capture-review-photo">${c.selfie ? `<img src="${h(c.selfie)}" alt="${h(label)} photo preview">` : '<div class="camera-placeholder"><div class="symbol">◉</div><p>Your photo will appear here.</p></div>'}</div>
+    <button class="btn secondary block" type="button" data-action="capture-photo" ${c.photoProcessing || c.submitting ? 'disabled' : ''}>${c.photoProcessing ? 'Preparing photo…' : c.selfie ? 'Retake photo' : 'Take photo'}</button>${c.photoProcessing ? '<p class="tiny-label" role="status">Preparing your photo…</p>' : ''}</div>
+    <div class="capture-details-panel"><div class="card-title"><span class="symbol">◷</span> ${h(label.toUpperCase())} PREVIEW</div><dl class="capture-preview-details"><div><dt>Employee</dt><dd>${h(state.session.user.name)}</dd></div><div><dt>Work date</dt><dd>${h(prettyDate(c.workDate))}</dd></div><div><dt>Time</dt><dd>${h(formatTime(c.previewAt))}</dd></div><div><dt>Status</dt><dd>${h(locationLabel)}</dd></div></dl><p class="tiny-label">Time is recorded when you tap Proceed.</p>
+    <div class="map-card" role="status" aria-live="polite">${c.locationPending ? '<span>Checking your location…</span>' : c.locationError ? `<span>${h(c.locationError)}</span>` : c.location ? `<strong>${c.method === 'ONSITE' ? h(site.siteName) : 'Offsite / field location'}</strong><small>GPS accuracy ±${Math.round(c.location.accuracyM)} m</small>${mapLink(c.location)}` : '<span>Location will be checked after you take a photo.</span>'}</div>
+    ${!c.locationPending && (c.locationError || c.location && !accurate) ? `<div class="notice warn">${c.location && !accurate ? 'Move near a window or outdoors for a more accurate location. ' : ''}<button class="link-button" type="button" data-action="location" ${c.submitting ? 'disabled' : ''}>Retry GPS</button></div>` : ''}
+    ${c.location && c.method === 'OFFSITE' ? `<div class="field"><label for="capture-note">Offsite assignment note (optional)</label><input id="capture-note" maxlength="300" placeholder="Client, location, or task" value="${h(c.note)}" ${c.submitting ? 'disabled' : ''}></div>` : ''}</div></div>
+    <div class="capture-review-actions"><button class="btn ghost" type="button" data-action="capture-cancel" ${c.submitting ? 'disabled' : ''}>Cancel</button><button class="btn" type="button" data-action="submit-punch" ${ready ? '' : 'disabled'} aria-busy="${!!c.submitting}">${c.submitting ? 'Recording…' : 'Proceed'}</button></div></section>`;
 }
 
 function renderProfile() {
@@ -1082,16 +1084,68 @@ async function loadProofSelfies(punches) {
     }
   }));
 }
-function stopCamera() { state.cameraStream?.getTracks().forEach(track => track.stop()); state.cameraStream = null; }
-async function startCamera() {
-  if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera API is unavailable. Use the device camera fallback over HTTPS.');
-  stopCamera();
-  const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
-  state.cameraStream = stream;
-  const box = document.getElementById('camera-box');
-  box.innerHTML = '<video autoplay playsinline muted aria-label="Selfie camera"></video>';
-  box.querySelector('video').srcObject = stream;
-  document.getElementById('camera-snap')?.classList.remove('hidden');
+function newCapture(slot, location = null) {
+  return { slot, userId: state.session.user.id, workDate: activeWorkDate(),
+    method: detectedPunchMethod(location, activeExtension()), location,
+    selfie: null, selfieBytes: null, previewAt: null, note: getTodayPunch('IN')?.note || '',
+    photoProcessing: false, locationPending: false, locationError: '', submitting: false };
+}
+function captureReady(c = state.capture) {
+  return !!(c?.selfie && c.location && c.location.accuracyM <= config().maxAccuracyM &&
+    !c.photoProcessing && !c.locationPending && !c.locationError && !c.submitting);
+}
+function clearCapture() {
+  state.capture = null;
+  const input = document.getElementById('selfie-file');
+  if (input) { input.value = ''; input.captureDraft = null; }
+}
+function openDeviceCamera() {
+  const c = state.capture;
+  if (!c || c.photoProcessing || c.submitting) return;
+  // Keep this input outside the rendered app so GPS/live updates cannot detach
+  // it while the operating system's camera is open.
+  let input = document.getElementById('selfie-file');
+  if (!input) {
+    input = document.createElement('input');
+    input.id = 'selfie-file'; input.type = 'file'; input.accept = 'image/*';
+    input.setAttribute('capture', 'user'); input.hidden = true;
+    document.body.append(input);
+  }
+  input.value = ''; input.captureDraft = c;
+  input.click();
+}
+function beginDeviceCapture(slot, location = null) {
+  if (state.capture?.submitting) return;
+  if (!navigator.onLine) throw new Error('Connect to the internet before recording attendance.');
+  if (holidayFor(activeWorkDate(), config().holidays)) throw new Error('No work is scheduled today. Ask an administrator to record exceptional work.');
+  const inPunch = getTodayPunch('IN'), outPunch = getTodayPunch('OUT');
+  if (inPunch && outPunch) throw new Error('Today’s Time In and Time Out are already complete.');
+  if (slot !== (inPunch ? 'OUT' : 'IN')) throw new Error('Attendance changed. Open the time clock again.');
+  closeModal();
+  state.capture = newCapture(slot, location); state.section = 'capture'; state.message = '';
+  render();
+  window.scrollTo(0, 0);
+  // This must stay synchronous with the employee's click to open the native
+  // camera. Location requests start after the camera returns a photo.
+  openDeviceCamera();
+}
+async function refreshCaptureLocation(c = state.capture) {
+  if (!c) return;
+  const request = c.locationRequest = (c.locationRequest || 0) + 1;
+  c.locationPending = true; c.locationError = '';
+  if (state.section === 'capture') renderView();
+  try {
+    const location = await geo();
+    if (state.capture !== c || c.locationRequest !== request) return;
+    c.location = location; c.method = detectedPunchMethod(location, activeExtension());
+  } catch (error) {
+    if (state.capture === c && c.locationRequest === request) c.locationError = error.message;
+  } finally {
+    if (state.capture === c && c.locationRequest === request) {
+      c.locationPending = false;
+      if (state.section === 'capture') renderView();
+    }
+  }
 }
 function canvasBlob(canvas, quality) {
   return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Unable to compress this image.')), 'image/jpeg', quality));
@@ -1113,29 +1167,26 @@ async function compressedJpeg(canvas, targetBytes, initialQuality = .78) {
   if (blob.size > 750_000) throw new Error('The image is still too large after compression. Try another photo.');
   return { dataUrl: await blobDataUrl(blob), bytes: blob.size };
 }
-async function snapCamera() {
-  const video = document.querySelector('#camera-box video');
-  if (!video || !video.videoWidth) throw new Error('Camera is not ready yet.');
-  const scale = Math.min(1, 720 / Math.max(video.videoWidth, video.videoHeight));
-  const canvas = document.createElement('canvas'); canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale);
-  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-  const compressed = await compressedJpeg(canvas, 220_000, .78);
-  state.capture.selfie = compressed.dataUrl; state.capture.selfieBytes = compressed.bytes;
-  stopCamera(); renderView();
-}
-async function fileSelfie(file) {
-  if (!file) return;
+async function fileSelfie(file, c = state.capture) {
+  if (!file || !c || state.capture !== c || c.photoProcessing || c.submitting) return;
   if (!file.type.startsWith('image/') || file.size > 15_000_000) throw new Error('Choose an image from the device camera under 15 MB.');
-  const bitmap = await createImageBitmap(file);
+  c.photoProcessing = true;
+  void refreshCaptureLocation(c);
+  let bitmap;
   try {
+    bitmap = await createImageBitmap(file);
     const canvas = document.createElement('canvas');
     const scale = Math.min(1, 900 / Math.max(bitmap.width, bitmap.height));
     canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale);
     canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
     const compressed = await compressedJpeg(canvas, 220_000, .78);
-    state.capture.selfie = compressed.dataUrl; state.capture.selfieBytes = compressed.bytes;
-  } finally { bitmap.close?.(); }
-  renderView();
+    if (state.capture !== c) return;
+    c.selfie = compressed.dataUrl; c.selfieBytes = compressed.bytes;
+    c.previewAt = new Date().toISOString();
+  } finally {
+    bitmap?.close?.(); c.photoProcessing = false;
+    if (state.capture === c && state.section === 'capture') renderView();
+  }
 }
 async function logoImages(file) {
   if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 5_000_000)
@@ -1168,20 +1219,34 @@ async function profileImageData(file) {
 }
 async function submitPunch() {
   const c = state.capture;
-  if (!navigator.onLine) throw new Error('Offline. The punch was not saved. Ask admin for a backfill if needed.');
+  if (c?.submitting) return;
+  if (!navigator.onLine) throw new Error('Offline. Attendance was not saved. Reconnect and try again.');
   if (getTodayPunch('IN') && getTodayPunch('OUT')) throw new Error('Today’s Time In and Time Out are already complete.');
-  if (!c?.location || !c.selfie) throw new Error('Selfie and device location are required.');
+  if (!captureReady(c)) throw new Error('Take a photo and finish the location check before proceeding.');
   c.note = document.getElementById('capture-note')?.value || c.note || '';
-  c.location = await geo();
-  c.method = detectedPunchMethod(c.location, activeExtension());
-  if (c.method === 'OFFSITE' && c.note.trim().length < 3) c.note = 'Offsite location automatically detected';
-  renderView();
-  const result = await api('/api/punch', { method: 'POST', body: JSON.stringify({ slot: c.slot, method: c.method,
-    latitude: c.location.latitude, longitude: c.location.longitude, accuracyM: c.location.accuracyM,
-    selfie: c.selfie, note: c.note }) });
-  stopCamera(); state.capture = null;
-  await loadEmployee(currentRange()); state.section = 'home'; render();
-  flash(`${result.punch.slot === 'IN' ? 'Time In' : 'Time Out'} saved at ${formatTime(result.punch.timeUtc)}. Pending admin verification.${result.overtimeAutoApplied ? ' Calculated OT (until 10:00 PM) or night differential was submitted for admin approval.' : ''}`, 'success');
+  c.submitting = true; renderView();
+  try {
+    try { c.location = await geo(); c.locationError = ''; }
+    catch (error) { c.locationError = error.message; throw error; }
+    if (state.capture !== c || state.session?.user.id !== c.userId) return;
+    if (c.location.accuracyM > config().maxAccuracyM) throw new Error('Location is not accurate enough. Retry GPS before proceeding.');
+    c.method = detectedPunchMethod(c.location, activeExtension());
+    if (c.method === 'OFFSITE' && c.note.trim().length < 3) c.note = 'Offsite location automatically detected';
+    const result = await api('/api/punch', { method: 'POST', body: JSON.stringify({ slot: c.slot, method: c.method,
+      latitude: c.location.latitude, longitude: c.location.longitude, accuracyM: c.location.accuracyM,
+      selfie: c.selfie, note: c.note }) });
+    if (!state.session || state.session.user.id !== c.userId) return;
+    state.employeeData.punches = [...state.employeeData.punches.filter(punch => punch.id !== result.punch.id), result.punch];
+    if (c.slot === 'OUT' && state.employeeData.openShift?.workDate === result.punch.workDate) state.employeeData.openShift = null;
+    clearCapture();
+    try { await loadEmployee(currentRange()); } catch { /* The server receipt already confirms this punch. */ }
+    if (state.session?.user.id !== c.userId) return;
+    state.section = 'home'; render();
+    flash(`${result.punch.slot === 'IN' ? 'Time In' : 'Time Out'} recorded successfully at ${formatTime(result.punch.timeUtc)}. Pending admin verification.${result.overtimeAutoApplied ? ' Extra hours were submitted for admin approval.' : ''}`, 'success');
+  } finally {
+    c.submitting = false;
+    if (state.capture === c && state.section === 'capture') renderView();
+  }
 }
 
 function updateOnline() { document.getElementById('offline')?.classList.toggle('hidden', navigator.onLine); }
@@ -1195,18 +1260,8 @@ document.addEventListener('click', async event => {
   try {
     if (node.dataset.nav) return await go(node.dataset.nav);
     if (action === 'auth-login' || action === 'auth-signup') { state.authMode = action === 'auth-signup' ? 'signup' : 'login'; state.message = ''; return renderLogin(); }
-    if (action === 'logout') { await api('/api/logout', { method: 'POST', body: '{}' }); state.session = null; state.section = 'home'; state.message = ''; await loadSignupStatus(); return render(); }
-    if (action === 'capture-auto') {
-      if (holidayFor(activeWorkDate(), config().holidays)) throw new Error('No work is scheduled today. Ask admin to record exceptional work.');
-      if (getTodayPunch('IN') && getTodayPunch('OUT')) throw new Error('Today’s Time In and Time Out are already complete.');
-      const location = await geo(), extension = activeExtension();
-      const method = detectedPunchMethod(location, extension);
-      state.capture = { slot: node.dataset.slot, method, location, selfie: null,
-        note: method === 'OFFSITE' ? (getTodayPunch('IN')?.note || 'Offsite location automatically detected') : '' };
-      await go('capture');
-      try { await startCamera(); } catch (error) { flash(`${error.message} Use the device camera button instead.`, 'warn'); }
-      return;
-    }
+    if (action === 'logout') { await api('/api/logout', { method: 'POST', body: '{}' }); clearCapture(); state.session = null; state.section = 'home'; state.message = ''; await loadSignupStatus(); return render(); }
+    if (action === 'capture-auto') return beginDeviceCapture(node.dataset.slot);
     if (action === 'continue-offsite') {
       if (!navigator.onLine) throw new Error('Connect to the internet before continuing overtime.');
       const location = await geo();
@@ -1214,7 +1269,7 @@ document.addEventListener('click', async event => {
       await loadEmployee(currentRange()); renderView();
       return flash('Offsite continuation recorded. Time Out with selfie and GPS when finished; extra hours need admin approval.', 'success');
     }
-    if (action === 'arrival-time-in') { const location = state.modal.location; closeModal(); state.capture = { slot: 'IN', method: 'ONSITE', location, selfie: null, note: '' }; await go('capture'); return await startCamera(); }
+    if (action === 'arrival-time-in') return beginDeviceCapture('IN', state.modal.location);
     if (action === 'modal-close') return closeModal();
     if (action === 'edit-profile') return showModal({ kind: 'edit-profile' });
     if (action === 'update-app') return showModal({ kind: 'update-app' });
@@ -1228,9 +1283,9 @@ document.addEventListener('click', async event => {
         ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       return;
     }
-    if (action === 'location') { state.capture.location = await geo(); return renderView(); }
-    if (action === 'camera-start') return await startCamera();
-    if (action === 'camera-snap') return await snapCamera();
+    if (action === 'location' && !state.capture?.submitting) return await refreshCaptureLocation();
+    if (action === 'capture-photo') return openDeviceCamera();
+    if (action === 'capture-cancel' && !state.capture?.submitting) { clearCapture(); return await go('home'); }
     if (action === 'submit-punch') return await submitPunch();
     if (action === 'cutoff-prev' || action === 'cutoff-next') {
       const range = state.historyRange || currentRange();
@@ -1376,7 +1431,11 @@ document.addEventListener('change', async event => {
     if (event.target.closest('.manual-interval')) updateIntervalPreviews(event.target.closest('form'));
     if (event.target.id === 'payroll-month') return syncPayrollEditor(true);
     if (event.target.id === 'cutoff-first-start' || event.target.id === 'cutoff-second-start') return syncPayrollEditor();
-    if (event.target.id === 'selfie-file') return await fileSelfie(event.target.files[0]);
+    if (event.target.id === 'selfie-file') {
+      const file = event.target.files[0], capture = event.target.captureDraft;
+      event.target.value = '';
+      return await fileSelfie(file, capture);
+    }
     if (event.target.id === 'signup-photo') {
       state.signupPhoto = await profileImageData(event.target.files[0]);
       const preview = document.getElementById('signup-photo-preview');
@@ -1398,7 +1457,7 @@ document.addEventListener('input', event => {
   if (event.target.id === 'capture-note' && state.capture) {
     state.capture.note = event.target.value;
     const button = document.querySelector('[data-action="submit-punch"]');
-    if (button) button.disabled = !state.capture.location || !state.capture.selfie || state.capture.location.accuracyM > config().maxAccuracyM;
+    if (button) button.disabled = !captureReady();
   }
   if (event.target.id === 'app-brand-name') {
     const label = document.querySelector('#brand-preview span:last-child, #brand-preview strong');
@@ -1412,14 +1471,14 @@ document.addEventListener('submit', async event => {
   try {
     if (id === 'login-form') {
       await api('/api/login', { method: 'POST', body: JSON.stringify({ identifier: values.identifier, password: values.password, remember: !!values.remember }) });
-      await refreshSession(); state.section = state.session.user.role === 'admin' ? 'dashboard' : 'home';
+      clearCapture(); await refreshSession(); state.section = state.session.user.role === 'admin' ? 'dashboard' : 'home';
       await go(state.section); return;
     }
     if (id === 'signup-form') {
       if (values.password !== values.confirmPassword) throw new Error('Passwords do not match.');
       await api('/api/admin/signup', { method: 'POST', body: JSON.stringify({ name: values.name, email: values.email,
         password: values.password, remember: !!values.remember, ...(state.signupPhoto ? { profileImage: state.signupPhoto } : {}) }) });
-      state.signupPhoto = null; state.signupAvailable = false;
+      clearCapture(); state.signupPhoto = null; state.signupAvailable = false;
       await refreshSession(); await go('dashboard'); return flash('Admin account created.', 'success');
     }
     if (id === 'password-form') { await api('/api/password', { method: 'POST', body: JSON.stringify(values) }); closeModal(); render(); return flash('Password updated.', 'success'); }

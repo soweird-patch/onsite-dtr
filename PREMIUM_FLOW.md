@@ -2,6 +2,10 @@
 
 The DTR records hours for payroll review; it does not calculate pay rates or deductions. All times use Asia/Manila.
 
+## Employee time clock
+
+Tap **Time In** or **Time Out** to open the device camera directly. Take a photo and accept it in the device camera, then review the photo, work date, time preview, and onsite/offsite status. **Retake photo** replaces the picture; canceling a retake keeps the existing picture. **Proceed** becomes available after the photo and GPS check are ready. It refreshes GPS and uploads the proof with the punch, then confirms the official time recorded by Convex. Canceling before Proceed does not save attendance. Failed uploads keep the photo for another attempt, and repeated taps cannot submit a second punch while a save is in progress.
+
 ## Actual working hours
 
 Employees sign in with their **username and password**. Admins set usernames and planned schedules in Employees; admin login uses email. Existing employee accounts receive a unique username based on their name, while passwords and attendance remain intact.
