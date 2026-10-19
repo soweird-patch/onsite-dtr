@@ -11,25 +11,37 @@ const client = deploymentUrl ? new ConvexHttpClient(deploymentUrl) : null;
 const liveClient = deploymentUrl ? new ConvexClient(deploymentUrl) : null;
 const liveSubscriptions = new Map();
 const liveVersions = new Map();
+const liveKeys = new Map();
+let adminDataKey = '', employeeDataKey = '', employeesLoaded = false;
+const dataKey = args => JSON.stringify([accessToken, args]);
 let adminLoadVersion = 0;
 let navigationVersion = 0;
 function stopWatch(key) {
   liveVersions.set(key, (liveVersions.get(key) || 0) + 1);
   liveSubscriptions.get(key)?.();
   liveSubscriptions.delete(key);
+  liveKeys.delete(key);
 }
 function stopLiveUpdates() {
   adminLoadVersion++;
   navigationVersion++;
+  adminDataKey = employeeDataKey = ''; employeesLoaded = false;
   for (const key of liveSubscriptions.keys()) stopWatch(key);
 }
 function watchData(key, query, args, apply, sections) {
+  const identity = dataKey(args);
+  if (liveSubscriptions.has(key) && liveKeys.get(key) === identity) return;
   stopWatch(key);
   const version = liveVersions.get(key);
   if (!liveClient) return;
   const token = accessToken;
+  liveKeys.set(key, identity);
+  let previousValue;
   liveSubscriptions.set(key, liveClient.onUpdate(query, { token, ...args }, value => {
     if (!state.session || accessToken !== token || liveVersions.get(key) !== version) return;
+    const serialized = JSON.stringify(value);
+    if (serialized === previousValue) return;
+    previousValue = serialized;
     apply(value);
     if (!state.modal && sections.includes(state.section)) renderView();
   }, () => { /* Normal requests surface authentication and connection errors. */ }));
@@ -523,22 +535,31 @@ async function refreshSession() {
   state.session = await api('/api/session');
   watchData('session', functions.core.session, {}, value => { state.session = value; }, ['home', 'history']);
 }
-async function loadEmployee(range = state.historyRange || currentRange()) {
+async function loadEmployee(range = state.historyRange || currentRange(), useCache = false) {
+  const key = dataKey(range);
   state.historyRange = range;
+  if (useCache && employeeDataKey === key && liveSubscriptions.has('attendance')) return;
   state.employeeData = await api(rangeUrl('/api/attendance', range));
+  employeeDataKey = key;
   watchData('attendance', functions.core.attendance, { from: range.start, to: range.end },
     value => { state.employeeData = value; }, ['home', 'history']);
 }
-async function loadEmployees() {
+async function loadEmployees(useCache = false) {
+  if (useCache && employeesLoaded && liveSubscriptions.has('employees')) return;
   state.employees = (await api('/api/admin/employees')).employees;
+  employeesLoaded = true;
   watchData('employees', functions.core.employees, {}, value => { state.employees = value.employees; },
     ['records', 'report', 'dashboard']);
 }
-async function loadAdmin(range = state.adminRange || currentRange(), employeeId = null, rememberRange = true) {
-  const version = ++adminLoadVersion, token = accessToken;
-  stopWatch('adminAttendance');
+async function loadAdmin(range = state.adminRange || currentRange(), employeeId = null, rememberRange = true, useCache = false) {
+  const key = dataKey({ range, employeeId });
   if (rememberRange) state.adminRange = range;
-  state.adminLoading = true; state.adminLoadError = '';
+  if (useCache && adminDataKey === key && liveSubscriptions.has('adminAttendance')) {
+    state.adminLoading = false; state.adminLoadError = ''; return;
+  }
+  const version = ++adminLoadVersion, token = accessToken;
+  if (adminDataKey !== key) stopWatch('adminAttendance');
+  state.adminLoading = adminDataKey !== key; state.adminLoadError = '';
   if (!state.modal) renderView();
   try {
     await api('/api/admin/extensions/sync', { method: 'POST', body: JSON.stringify({ from: range.start, to: range.end }) });
@@ -546,6 +567,7 @@ async function loadAdmin(range = state.adminRange || currentRange(), employeeId 
     const data = await api(rangeUrl('/api/admin/attendance', range, employeeId));
     if (version !== adminLoadVersion || token !== accessToken) return;
     state.adminData = data;
+    adminDataKey = key;
     watchData('adminAttendance', functions.core.adminAttendance,
       { from: range.start, to: range.end, ...(employeeId ? { employeeId } : {}) },
       value => { state.adminData = value; }, ['records', 'report', 'dashboard']);
@@ -608,22 +630,22 @@ function backfillInputFromForm(form) {
 }
 async function go(section) {
   const navigation = ++navigationVersion;
-  adminLoadVersion++; stopWatch('adminAttendance');
+  adminLoadVersion++;
   state.adminLoading = ['dashboard', 'records', 'report'].includes(section);
   state.adminLoadError = '';
   if (section !== 'capture') closeFrontCamera();
   state.section = section; state.modal = null; state.message = '';
-  if (state.session?.user.role === 'admin' && state.adminLoading) renderView();
+
   if (section === 'report') { state.reportRange = null; state.reportEmployeeId = null; }
   if (section === 'backfill') { state.backfillLoadId++; state.backfillLoading = false; state.backfillDraft = blankBackfillDraft(); }
   try {
-    if (state.session.user.role === 'employee' && ['home', 'history'].includes(section)) await loadEmployee(section === 'home' ? currentRange() : state.historyRange || currentRange());
+    if (state.session.user.role === 'employee' && ['home', 'history'].includes(section)) await loadEmployee(section === 'home' ? currentRange() : state.historyRange || currentRange(), true);
     if (state.session.user.role === 'admin') {
-      if (['dashboard', 'employees', 'backfill', 'records', 'report'].includes(section)) await loadEmployees();
+      if (['dashboard', 'employees', 'backfill', 'records', 'report'].includes(section)) await loadEmployees(true);
       if (navigation !== navigationVersion) return;
-      if (section === 'dashboard') await loadAdmin(currentRange(), null, false);
-      if (section === 'records') await loadAdmin(state.adminRange || currentRange());
-      if (section === 'report') await loadAdmin(state.reportRange || currentRange(), null, false);
+      if (section === 'dashboard') await loadAdmin(currentRange(), null, false, true);
+      if (section === 'records') await loadAdmin(state.adminRange || currentRange(), null, true, true);
+      if (section === 'report') await loadAdmin(state.reportRange || currentRange(), null, false, true);
       if (section === 'audit') state.auditItems = (await api('/api/admin/audit')).items;
     }
   } catch (error) { if (navigation === navigationVersion) { state.adminLoading = false; state.adminLoadError = error.message; flash(error.message, 'error'); } }
@@ -1679,7 +1701,7 @@ window.addEventListener('appinstalled', () => { state.installPrompt = null; stat
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
 async function resumeAttendance() {
-  if (!state.session) return;
+  if (!state.session || new Date().toLocaleDateString('en-CA', { timeZone }) === today()) return;
   try {
     await refreshSession();
     // Preserve an open review and its unsaved reason when returning to this tab.
@@ -1703,8 +1725,7 @@ setInterval(() => {
   else if (state.session.user.role === 'employee' && state.section === 'home') {
     if (getTodayPunch('IN') && !getTodayPunch('OUT')) renderView();
   }
-  else if (state.session.user.role === 'admin' && state.section === 'dashboard')
-    void loadAdmin(currentRange(), null, false).then(renderView).catch(error => flash(error.message, 'error'));
+
 }, 60000);
 
 await loadBranding();

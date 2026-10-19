@@ -18,7 +18,7 @@ function harness() {
     request(path){return new Promise((resolve,reject)=>requests.push({path,resolve,reject}));}});
   vm.runInContext(source+`
     api=request; renderView=()=>{};
-    globalThis.app={state,loadAdmin,watchData,stopWatch,resumeAttendance,
+    globalThis.app={state,loadAdmin,watchData,stopWatch,resumeAttendance,stopLiveUpdates,
       refresh:fn=>refreshSession=fn};
     state.session={today:'2026-10-19',user:{role:'admin'},cutoff:{start:'2026-10-11',end:'2026-10-25'}};
     state.section='records';
@@ -69,4 +69,38 @@ test('a failed current load stays an error instead of showing old records as act
   await assert.rejects(loading,/Connection lost/);
   assert.equal(f.state.adminLoading,false);assert.equal(f.state.adminLoadError,'Connection lost');
   assert.equal(f.subscriptions.length,0);
+});
+
+
+test('navigation to the same attendance range reuses cached data and the live subscription',async()=>{
+  const f=harness(), selected=range('2026-10-19');
+  const initial=f.loadAdmin(selected);f.requests[0].resolve({});await tick();
+  f.requests[1].resolve({punches:['cached']});await initial;
+  const live=f.subscriptions[0];
+  await f.loadAdmin(selected,null,true,true);
+  assert.equal(f.requests.length,2);assert.equal(f.subscriptions.length,1);
+  assert.equal(live.stopped,false);assert.equal(f.state.adminLoading,false);
+  live.callback({punches:['updated-by-server']});
+  assert.deepEqual(f.state.adminData.punches,['updated-by-server']);
+  await f.loadAdmin(selected,null,true,true);
+  assert.deepEqual(f.state.adminData.punches,['updated-by-server']);assert.equal(f.requests.length,2);
+});
+
+test('post-approval reconciliation keeps cached rows visible and does not recreate the live subscription',async()=>{
+  const f=harness(), selected=range('2026-10-19');
+  const initial=f.loadAdmin(selected);f.requests[0].resolve({});await tick();
+  f.requests[1].resolve({punches:['pending']});await initial;
+  const refresh=f.loadAdmin(selected);
+  assert.equal(f.state.adminLoading,false);assert.deepEqual(f.state.adminData.punches,['pending']);
+  assert.equal(f.subscriptions[0].stopped,false);
+  f.requests[2].resolve({});await tick();f.requests[3].resolve({punches:['approved']});await refresh;
+  assert.equal(f.subscriptions.length,1);assert.deepEqual(f.state.adminData.punches,['approved']);
+});
+
+test('unchanged live snapshots do not repaint the screen, and logout clears reusable data',async()=>{
+  const f=harness();let applied=0;
+  f.watchData('example',{}, {},()=>applied++,[]);
+  f.subscriptions[0].callback({value:1});f.subscriptions[0].callback({value:1});
+  assert.equal(applied,1);
+  f.stopLiveUpdates();f.subscriptions[0].callback({value:2});assert.equal(applied,1);
 });
