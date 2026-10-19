@@ -84,7 +84,12 @@ export function openFrontCamera() {
       const canvas = document.createElement('canvas');
       const scale = Math.min(1, 900 / Math.max(video.videoWidth, video.videoHeight));
       canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale);
-      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+      // The live front-camera view is mirrored; bake that same orientation into
+      // the photo so the review, upload, and admin proof all match what was seen.
+      const context = canvas.getContext('2d');
+      context.translate(canvas.width, 0);
+      context.scale(-1, 1);
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
       finish(canvas);
     } catch (error) { fail(error.message); }
   });
