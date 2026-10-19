@@ -70,7 +70,7 @@ const appInstalled = () => window.matchMedia('(display-mode: standalone)').match
 const iosBrowser = () => /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
 
 function installPromptMarkup(extraClass = '') {
-  if (appInstalled() || state.installDismissed || (!state.installPrompt && !iosBrowser())) return '';
+  if (state.session?.user.role === 'admin' || appInstalled() || state.installDismissed || (!state.installPrompt && !iosBrowser())) return '';
   const ios = iosBrowser() && !state.installPrompt;
   return `<aside class="install-banner ${h(extraClass)}" aria-label="Install ${h(state.branding.appName)}"><div class="install-mark">${brandIconMarkup()}</div><div class="install-copy"><strong>Install ${h(state.branding.appName)}</strong><p>${ios ? 'On iPhone or iPad, tap Share then “Add to Home Screen”.' : 'Add this app to your device for faster, full-screen attendance access.'}</p></div><div class="install-actions">${ios ? '' : '<button class="btn small" data-action="install">Install</button>'}<button class="install-close" data-action="dismiss-install" aria-label="Dismiss install prompt">×</button></div></aside>`;
 }
@@ -779,7 +779,7 @@ function renderProfile() {
   const s = config();
   return `<div class="section-head"><div><p class="eyebrow">ACCOUNT</p><h1 class="section-title">Profile & settings</h1><p>Manage your account, company app, work site, and payroll schedule.</p></div></div>
     <div class="profile-card card"><div class="profile-summary"><div class="profile-avatar profile-avatar-large">${avatarMarkup(user)}</div><div class="profile-copy"><span class="pill admin">Administrator</span><h2>${h(user.name)}</h2><p>${h(user.email)}</p></div></div>
-      <div class="profile-actions"><button class="btn" data-action="edit-profile"><span aria-hidden="true">✎</span> Edit Profile</button><button class="btn ghost" data-action="logout">Sign out</button>${state.installPrompt ? '<button class="btn ghost" data-action="install">Install PWA</button>' : ''}</div></div>
+      <div class="profile-actions"><button class="btn" data-action="edit-profile"><span aria-hidden="true">✎</span> Edit Profile</button><button class="btn ghost" data-action="logout">Sign out</button></div></div>
     <div class="settings-list settings-extra">
       <div class="settings-row"><div class="settings-icon">${brandIconMarkup()}</div><div class="settings-copy"><strong>App appearance</strong><p>${h(state.branding.appName)} · Update the app name and logo.</p></div><button class="btn secondary small" data-action="update-app">Update App</button></div>
       <div class="settings-row"><div class="settings-icon"><span class="symbol">◎</span></div><div class="settings-copy"><strong>Manage site</strong><p>${s.configured ? `${h(s.siteName)} · ${s.radiusM} m allowed radius` : 'Site GPS location has not been configured.'}</p></div><button class="btn secondary small" data-action="site-settings">Site GPS</button></div>
@@ -1487,7 +1487,7 @@ document.addEventListener('click', async event => {
     }
     if (action === 'print') return window.print();
     if (action === 'dismiss-install') { state.installDismissed = true; return render(); }
-    if (action === 'install' && state.installPrompt) {
+    if (action === 'install' && state.session?.user.role !== 'admin' && state.installPrompt) {
       const prompt = state.installPrompt;
       await prompt.prompt();
       const choice = await prompt.userChoice;
