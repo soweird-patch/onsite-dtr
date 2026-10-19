@@ -10,16 +10,26 @@ const deploymentUrl = import.meta.env.VITE_CONVEX_URL;
 const client = deploymentUrl ? new ConvexHttpClient(deploymentUrl) : null;
 const liveClient = deploymentUrl ? new ConvexClient(deploymentUrl) : null;
 const liveSubscriptions = new Map();
+const liveVersions = new Map();
+let adminLoadVersion = 0;
+let navigationVersion = 0;
+function stopWatch(key) {
+  liveVersions.set(key, (liveVersions.get(key) || 0) + 1);
+  liveSubscriptions.get(key)?.();
+  liveSubscriptions.delete(key);
+}
 function stopLiveUpdates() {
-  for (const unsubscribe of liveSubscriptions.values()) unsubscribe();
-  liveSubscriptions.clear();
+  adminLoadVersion++;
+  navigationVersion++;
+  for (const key of liveSubscriptions.keys()) stopWatch(key);
 }
 function watchData(key, query, args, apply, sections) {
-  liveSubscriptions.get(key)?.();
+  stopWatch(key);
+  const version = liveVersions.get(key);
   if (!liveClient) return;
   const token = accessToken;
   liveSubscriptions.set(key, liveClient.onUpdate(query, { token, ...args }, value => {
-    if (!state.session || accessToken !== token) return;
+    if (!state.session || accessToken !== token || liveVersions.get(key) !== version) return;
     apply(value);
     if (!state.modal && sections.includes(state.section)) renderView();
   }, () => { /* Normal requests surface authentication and connection errors. */ }));
@@ -31,7 +41,7 @@ const state = {
   branding: { appName: 'Onsite DTR', logo192Url: null, logo512Url: null },
   signupAvailable: false, authMode: 'login', signupPhoto: null,
   employees: [], adminData: { punches: [], extensions: [], overtime: [] }, historyRange: null,
-  adminRange: null, reportRange: null, reportEmployeeId: null, capture: null,
+  adminLoading: false, adminLoadError: '', adminRange: null, reportRange: null, reportEmployeeId: null, capture: null,
   backfillDraft: null, backfillLoadId: 0, backfillLoading: false,
   sitePromptedDate: null, onsiteAccess: null, installPrompt: null, installDismissed: false, modal: null, auditItems: [],
   message: '', messageType: 'notice'
@@ -525,12 +535,27 @@ async function loadEmployees() {
     ['records', 'report', 'dashboard']);
 }
 async function loadAdmin(range = state.adminRange || currentRange(), employeeId = null, rememberRange = true) {
+  const version = ++adminLoadVersion, token = accessToken;
+  stopWatch('adminAttendance');
   if (rememberRange) state.adminRange = range;
-  await api('/api/admin/extensions/sync', { method: 'POST', body: JSON.stringify({ from: range.start, to: range.end }) });
-  state.adminData = await api(rangeUrl('/api/admin/attendance', range, employeeId));
-  watchData('adminAttendance', functions.core.adminAttendance,
-    { from: range.start, to: range.end, ...(employeeId ? { employeeId } : {}) },
-    value => { state.adminData = value; }, ['records', 'report', 'dashboard']);
+  state.adminLoading = true; state.adminLoadError = '';
+  if (!state.modal) renderView();
+  try {
+    await api('/api/admin/extensions/sync', { method: 'POST', body: JSON.stringify({ from: range.start, to: range.end }) });
+    if (version !== adminLoadVersion || token !== accessToken) return;
+    const data = await api(rangeUrl('/api/admin/attendance', range, employeeId));
+    if (version !== adminLoadVersion || token !== accessToken) return;
+    state.adminData = data;
+    watchData('adminAttendance', functions.core.adminAttendance,
+      { from: range.start, to: range.end, ...(employeeId ? { employeeId } : {}) },
+      value => { state.adminData = value; }, ['records', 'report', 'dashboard']);
+  } catch (error) {
+    if (version !== adminLoadVersion || token !== accessToken) return;
+    state.adminLoadError = error.message;
+    throw error;
+  } finally {
+    if (version === adminLoadVersion && token === accessToken) state.adminLoading = false;
+  }
 }
 function blankBackfillDraft() {
   return { employeeId: '', workDate: today(), reason: '', expectedIds: [], punches: [],
@@ -582,20 +607,27 @@ function backfillInputFromForm(form) {
   return input;
 }
 async function go(section) {
+  const navigation = ++navigationVersion;
+  adminLoadVersion++; stopWatch('adminAttendance');
+  state.adminLoading = ['dashboard', 'records', 'report'].includes(section);
+  state.adminLoadError = '';
   if (section !== 'capture') closeFrontCamera();
   state.section = section; state.modal = null; state.message = '';
+  if (state.session?.user.role === 'admin' && state.adminLoading) renderView();
   if (section === 'report') { state.reportRange = null; state.reportEmployeeId = null; }
   if (section === 'backfill') { state.backfillLoadId++; state.backfillLoading = false; state.backfillDraft = blankBackfillDraft(); }
   try {
     if (state.session.user.role === 'employee' && ['home', 'history'].includes(section)) await loadEmployee(section === 'home' ? currentRange() : state.historyRange || currentRange());
     if (state.session.user.role === 'admin') {
       if (['dashboard', 'employees', 'backfill', 'records', 'report'].includes(section)) await loadEmployees();
+      if (navigation !== navigationVersion) return;
       if (section === 'dashboard') await loadAdmin(currentRange(), null, false);
-      if (section === 'records') await loadAdmin(state.adminRange || { start: today(), end: today() });
+      if (section === 'records') await loadAdmin(state.adminRange || currentRange());
       if (section === 'report') await loadAdmin(state.reportRange || currentRange(), null, false);
       if (section === 'audit') state.auditItems = (await api('/api/admin/audit')).items;
     }
-  } catch (error) { flash(error.message, 'error'); }
+  } catch (error) { if (navigation === navigationVersion) { state.adminLoading = false; state.adminLoadError = error.message; flash(error.message, 'error'); } }
+  if (navigation !== navigationVersion) return;
   render();
   window.scrollTo(0, 0);
 }
@@ -617,6 +649,11 @@ function renderShell() {
 function renderView() {
   const view = document.getElementById('view'); if (!view) return;
   const admin = state.session.user.role === 'admin';
+  if (admin && ['dashboard', 'records', 'report'].includes(state.section) && (state.adminLoading || state.adminLoadError)) {
+    view.innerHTML = state.adminLoading ? '<div class="notice" role="status">Loading attendance for the selected date range…</div>'
+      : '<div class="notice warn" role="alert">Could not load attendance. Please reopen this page to retry. ' + h(state.adminLoadError) + '</div>';
+    return;
+  }
   view.innerHTML = admin ? ({ dashboard: renderAdminHome, records: renderRecords, employees: renderEmployees, backfill: renderBackfill, report: renderReport, settings: renderSettings, profile: renderProfile, audit: renderAudit }[state.section] || renderAdminHome)()
     : ({ home: renderEmployeeHome, history: renderHistory, capture: renderCapture, profile: renderProfile }[state.section] || renderEmployeeHome)();
 }
@@ -828,7 +865,7 @@ function renderPremiumQueue() {
   }).join('')}</div>` : '<div class="empty"><strong>Approval completed</strong><p>No employees need overtime or differential approval in this date range.</p></div>'}</section>`;
 }
 function renderRecords() {
-  const range = state.adminRange || { start: today(), end: today() };
+  const range = state.adminRange || currentRange();
   return `<div class="section-head"><div><p class="eyebrow">ADMIN · ${h(dateSpan(range))}</p><h1 class="section-title">Attendance records</h1><p>Open one employee workday, review both punches, then approve it for payroll.</p></div><button class="icon-btn" type="button" data-action="records-filter" aria-label="Filter attendance by date range" title="Filter by date range"><span aria-hidden="true">☷</span></button></div>${renderPremiumQueue()}<div class="section-head settings-extra"><h2 class="section-title">Daily employee attendance</h2></div>${state.adminData.punches.length ? `<div class="list">${dailyRecordItems(state.adminData.punches)}</div>` : '<div class="empty">No attendance records for this date range.</div>'}`;
 }
 function renderEmployeeForm(employee = null, draft = null) {
@@ -1052,7 +1089,7 @@ function showModal(modal) {
     const firstStart = monthDate(month, firstDay), secondStart = monthDate(month, secondDay);
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="payroll-settings-title"><div class="modal-head"><div><p class="modal-kicker">PAYROLL SETTINGS</p><h2 id="payroll-settings-title">Set Payroll Cutoff</h2></div><button class="close" data-action="modal-close" aria-label="Close Payroll settings">×</button></div><p>Select a month first, then choose the two cutoff start dates. The date ranges update to match that calendar month.</p><form id="payroll-settings-form"><div class="field"><label for="payroll-month">Payroll month</label><input id="payroll-month" name="payrollMonth" type="month" value="${month}" required></div><div class="field-row"><div class="field"><label for="cutoff-first-start">First cutoff starts</label><input id="cutoff-first-start" name="firstStart" type="date" min="${month}-01" max="${monthEnd(month)}" value="${firstStart}" required></div><div class="field"><label for="cutoff-second-start">Second cutoff starts</label><input id="cutoff-second-start" name="secondStart" type="date" min="${month}-01" max="${monthEnd(month)}" value="${secondStart}" required></div></div><div class="cutoff-preview" id="payroll-preview">${payrollPreviewMarkup(month, firstStart, secondStart)}</div><div class="notice">Sundays are not counted as scheduled cutoff days by default. If an employee works on Sunday, use <strong>Add attendance</strong>; that record will still appear in payroll as off-day work.</div><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn" type="submit">Save Payroll</button></div></form></div></div>`;
   } else if (modal.kind === 'records-filter') {
-    const range = state.adminRange || { start: today(), end: today() };
+    const range = state.adminRange || currentRange();
     holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal filter-modal" role="dialog" aria-modal="true" aria-labelledby="records-filter-title"><div class="modal-head"><div><p class="modal-kicker">ATTENDANCE RECORDS</p><h2 id="records-filter-title">Filter Date Range</h2></div><button class="close" data-action="modal-close" aria-label="Close date filter">×</button></div><p>Records show today by default. Choose another date range when needed.</p><form id="records-filter"><div class="field-row"><div class="field"><label for="records-from">From</label><input id="records-from" type="date" name="from" value="${h(range.start)}" required></div><div class="field"><label for="records-to">To</label><input id="records-to" type="date" name="to" value="${h(range.end)}" required></div></div><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Cancel</button><button class="btn" type="submit">Apply Filter</button></div></form></div></div>`;
   } else if (modal.kind === 'employee-confirm') {
     const { input, editing } = modal;
@@ -1645,7 +1682,14 @@ async function resumeAttendance() {
   if (!state.session) return;
   try {
     await refreshSession();
-    await go(state.section);
+    // Preserve an open review and its unsaved reason when returning to this tab.
+    if (state.modal) return;
+    if (state.session.user.role === 'admin' && ['dashboard', 'records', 'report'].includes(state.section)) {
+      const range = state.section === 'records' ? state.adminRange || currentRange()
+        : state.section === 'report' ? state.reportRange || currentRange() : currentRange();
+      await loadAdmin(range, null, state.section === 'records');
+      if (!state.modal) renderView();
+    } else await go(state.section);
   } catch (error) { flash(error.message, 'error'); }
 }
 document.addEventListener('visibilitychange', () => {
