@@ -5,7 +5,7 @@ import { getFunctionName } from 'convex/server';
 import { login } from '../convex/authActions.js';
 import { approveAttendanceDay, attendance, autoTimeOut, backfill, continueOffsite, reviewExtension, syncAutomaticPremiums,
   saveAdminAttendanceDay, submitPunch, updateEmployee, verify, createEmployee, userForLogin,
-  migrateEmployeeUsernames, loginAttempt, recordLoginFailure, issueSession } from '../convex/core.js';
+  migrateEmployeeUsernames, loginAttempt, recordLoginFailure, issueSession, reviewAttendanceInterval } from '../convex/core.js';
 import { localDateTime, payrollDayTotals, shiftInstant, workBreakdownIntervals } from '../rules.js';
 import { punchView } from '../convex/lib.js';
 
@@ -37,13 +37,114 @@ function fixture() {
     async delete(id) { tables[id.split(':')[0]].delete(id); },
     async replace(id, value) { const table = id.split(':')[0]; tables[table].set(id, { _id: id, ...value }); }
   };
-  const ctx = { db };
+  const scheduled = [];
+  const ctx = { db, scheduler: { async runAt(time, reference, args) { scheduled.push({ time, reference, args }); } } };
   const token = 'a'.repeat(64);
   const addUser = (name, role) => db.insert('users', { name, email: `${name.toLowerCase()}@example.test`, role, active: true });
   const authorize = async adminId => db.insert('sessions', { userId: adminId,
     tokenHash: createHash('sha256').update(token).digest('hex'), expiresAt: Date.now() + 86400000 });
-  return { ctx, tables, token, addUser, authorize };
+  return { ctx, tables, token, addUser, authorize, scheduled };
 }
+
+test('employee returns for interval two, then admin reviews it without entering times', async () => {
+  const f = fixture(), date = '2026-10-15', worker = await f.addUser('Worker', 'employee'), admin = await f.addUser('Admin', 'admin');
+  const sessionId = await f.authorize(worker);
+  f.ctx.db.system = { async get() { return { contentType: 'image/jpeg', size: 2000 }; } };
+  const RealDate = globalThis.Date;
+  let instant = Date.parse(shiftInstant(date, '08:00'));
+  globalThis.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : [instant])); } static now() { return instant; } };
+  const punch = (slot, segment, time) => { instant = RealDate.parse(shiftInstant(date, time)); return submitPunch._handler(f.ctx,
+    { token: f.token, selfieId: `photo-${segment}-${slot}`, input: { slot, segment, workDate: date, latitude: 14.5, longitude: 121, accuracyM: 10 } }); };
+  const rows = () => [...f.tables.punches.values()];
+  const review = (segment, decision, expectedIds = rows().filter(p => p.segment === segment).map(p => p._id)) =>
+    reviewAttendanceInterval._handler(f.ctx, { token: f.token, userId: worker, workDate: date, segment, expectedIds, decision });
+  try {
+    await punch('IN', 1, '08:00'); await punch('OUT', 1, '15:00');
+    const original = rows().map(p => ({ id: p._id, time: p.timeUtc, photo: p.selfieId }));
+    const returned = await punch('IN', 2, '17:30');
+    assert.equal(returned.punch.segment, 2); assert.equal(returned.punch.verification, 'PENDING');
+    assert.equal(returned.clock.nextSlot, 'OUT'); assert.equal(returned.clock.nextSegment, 2);
+    await assert.rejects(punch('IN', 2, '17:31'), /already recorded|changed/);
+    await assert.rejects(review(1, 'APPROVED'), /Not allowed/);
+    await f.ctx.db.patch(sessionId, { userId: admin });
+    await review(1, 'APPROVED');
+    assert.equal(payrollDayTotals(date, rows(), null).regular, 360);
+    await assert.rejects(review(2, 'APPROVED'), /Wait for both/);
+    await f.ctx.db.patch(sessionId, { userId: worker });
+    const exit = await punch('OUT', 2, '20:30');
+    assert.equal(exit.clock.nextSlot, 'IN'); assert.equal(exit.clock.nextSegment, 3);
+    assert.equal(rows().length, 4);
+    assert.deepEqual(rows().filter(p => p.segment === 1).map(p => ({ id: p._id, time: p.timeUtc, photo: p.selfieId })), original);
+    await f.ctx.db.patch(sessionId, { userId: admin });
+    await assert.rejects(review(2, 'APPROVED', original.map(p => p.id)), /interval changed/);
+    await review(2, 'APPROVED');
+    const extension = [...f.tables.extensions.values()][0];
+    assert.equal(payrollDayTotals(date, rows(), extension).regular, 480);
+    assert.equal(payrollDayTotals(date, rows(), extension).overtime, 0);
+    await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id, stage: 'OVERTIME', decision: 'APPROVED', calculationKey: extension.calculationKey });
+    assert.equal(payrollDayTotals(date, rows(), extension).overtime, 60);
+    assert.equal(f.scheduled.length, 2);
+    assert.equal(f.scheduled[1].args.segment, 2);
+    assert.ok([...f.tables.audit.values()].some(event => event.action === 'attendance_interval_review' && event.details.segment === 2));
+  } finally { globalThis.Date = RealDate; }
+});
+
+test('declining a return interval preserves approved first-interval payroll and can be reviewed again', async () => {
+  const f = fixture(), date = '2026-10-15', admin = await f.addUser('Admin', 'admin'), worker = await f.addUser('Worker', 'employee');
+  await f.authorize(admin);
+  for (const [segment, start, end, verification] of [[1,'08:00','17:00','APPROVED'],[2,'18:00','20:00','PENDING']]) {
+    for (const [slot,time] of [['IN',start],['OUT',end]]) await f.ctx.db.insert('punches', { userId: worker, workDate: date, segment, slot,
+      timeUtc: shiftInstant(date,time), method: 'ONSITE', selfieId: `photo-${segment}-${slot}`, verification, active: true });
+  }
+  const rows = () => [...f.tables.punches.values()];
+  const expectedIds = rows().filter(p => p.segment === 2).map(p => p._id);
+  const input = { token: f.token, userId: worker, workDate: date, segment: 2, expectedIds };
+  await reviewAttendanceInterval._handler(f.ctx, { ...input, decision: 'REJECTED' });
+  assert.equal(payrollDayTotals(date, rows(), null).regular, 480);
+  assert.equal(payrollDayTotals(date, rows(), null).overtime, 0);
+  assert.ok(rows().filter(p => p.segment === 1).every(p => p.verification === 'APPROVED'));
+  assert.ok(rows().filter(p => p.segment === 2).every(p => p.verification === 'REJECTED' && p.active && p.selfieId));
+  await approveAttendanceDay._handler(f.ctx, { token: f.token, userId: worker, workDate: date });
+  assert.ok(rows().filter(p => p.segment === 2).every(p => p.verification === 'REJECTED'));
+  await reviewAttendanceInterval._handler(f.ctx, { ...input, decision: 'APPROVED' });
+  const extension = [...f.tables.extensions.values()][0];
+  assert.equal(extension.overtimeDecision, 'PENDING');
+  await reviewExtension._handler(f.ctx, { token: f.token, id: extension._id, stage: 'OVERTIME', decision: 'APPROVED', calculationKey: extension.calculationKey });
+  assert.equal(payrollDayTotals(date, rows(), extension).overtime, 120);
+  await reviewAttendanceInterval._handler(f.ctx, { ...input, decision: 'REJECTED', reason: 'Task cancelled' });
+  assert.equal(payrollDayTotals(date, rows(), extension).regular, 480);
+  assert.equal(payrollDayTotals(date, rows(), extension).overtime, 0);
+});
+
+test('a second interval after midnight belongs to the starting cutoff day and auto-closes its own segment', async () => {
+  const f = fixture(), date = '2026-10-25', worker = await f.addUser('Worker', 'employee');
+  const sessionId = await f.authorize(worker);
+  await f.ctx.db.patch(sessionId, { expiresAt: Date.parse('2027-01-01T00:00:00Z') });
+  f.ctx.db.system = { async get() { return { contentType: 'image/jpeg', size: 2000 }; } };
+  for (const [slot,time] of [['IN','08:00'],['OUT','17:00']]) await f.ctx.db.insert('punches', { userId: worker, workDate: date,
+    segment: 1, slot, timeUtc: shiftInstant(date,time), method: 'ONSITE', verification: 'APPROVED', active: true });
+  const RealDate = globalThis.Date; let instant = RealDate.parse(shiftInstant(date,'00:30',true));
+  globalThis.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : [instant])); } static now() { return instant; } };
+  try {
+    const before = await attendance._handler(f.ctx,{token:f.token,from:'2026-10-26',to:'2026-11-10'});
+    assert.equal(before.punches.length,0); assert.equal(before.clock.workDate,date); assert.equal(before.clock.nextSegment,2);
+    const input = { slot:'IN',segment:2,workDate:date,latitude:14.5,longitude:121,accuracyM:10 };
+    const result = await submitPunch._handler(f.ctx,{token:f.token,input,selfieId:'photo'});
+    assert.equal(result.punch.workDate,date);
+    const opened = await attendance._handler(f.ctx,{token:f.token,from:'2026-10-26',to:'2026-11-10'});
+    assert.equal(opened.openShift.inPunch.segment,2); assert.equal(opened.clock.nextSlot,'OUT');
+    instant = RealDate.parse(shiftInstant(date,'06:00',true));
+    await autoTimeOut._handler(f.ctx,{userId:worker,workDate:date,segment:2});
+    await autoTimeOut._handler(f.ctx,{userId:worker,workDate:date,segment:2});
+    const rows = [...f.tables.punches.values()];
+    assert.equal(rows.length,4);
+    assert.equal(rows.find(p=>p.segment===2&&p.slot==='OUT').verification,'PENDING');
+    assert.equal(rows.find(p=>p.segment===2&&p.slot==='OUT').timeUtc,shiftInstant(date,'06:00',true));
+    assert.equal(payrollDayTotals(date,rows,[...f.tables.extensions.values()][0]).regular,480);
+    const next = await attendance._handler(f.ctx,{token:f.token,from:'2026-10-26',to:'2026-11-10'});
+    assert.equal(next.clock.workDate,'2026-10-26'); assert.equal(next.clock.nextSegment,1);
+  } finally {globalThis.Date=RealDate;}
+});
 
 test('employee username login is case-insensitive, rejects phone/email login, and keeps admin email login', async () => {
   const f = fixture(), adminId = await f.addUser('Admin','admin');

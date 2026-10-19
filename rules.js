@@ -166,6 +166,39 @@ export function groupPunches(punches = []) {
   return [...groups.values()].sort((a, b) => a.number - b.number);
 }
 
+export const MAX_WORK_INTERVALS = 6;
+
+// Select a workday and interval on the server clock, including a return after midnight.
+export function attendanceClockState(instant, currentPunches = [], previousPunches = [], holidays = []) {
+  const local = localDateTime(instant), previousDate = new Date(Date.parse(`${local.date}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+  const previousLast = groupPunches(previousPunches).at(-1);
+  const previousOpen = previousLast?.inPunch && !previousLast.outPunch;
+  const usePrevious = local.minutes <= 360 && previousOpen ||
+    local.minutes < 360 && previousPunches.length > 0 && currentPunches.length === 0;
+  const workDate = usePrevious ? previousDate : local.date;
+  const punches = usePrevious ? previousPunches : currentPunches;
+  const groups = groupPunches(punches), last = groups.at(-1);
+  const nextSlot = last?.inPunch && !last.outPunch ? 'OUT' : 'IN';
+  const nextSegment = nextSlot === 'OUT' ? last.number : (last?.number || 0) + 1;
+  let blockReason = '';
+  if (groups.some((group, index) => !group.inPunch || !group.outPunch && index < groups.length - 1))
+    blockReason = 'An earlier interval is incomplete. Ask admin to correct it before continuing.';
+  else if (holidayFor(workDate, holidays)) blockReason = 'No scheduled work today. Ask admin to record exceptional work.';
+  else if (nextSlot === 'IN' && nextSegment > MAX_WORK_INTERVALS) blockReason = 'All six intervals for this workday are complete.';
+  else if (nextSlot === 'IN' && nextSegment === 1 && (local.minutes < FLEXIBLE_START_MINUTES || local.minutes > FLEXIBLE_END_MINUTES))
+    blockReason = 'First Time In is available between 6:00 AM and 5:00 PM. Ask admin to record exceptional work.';
+  else if (nextSlot === 'IN' && last?.outPunch && instant < last.outPunch.timeUtc)
+    blockReason = 'The previous Time Out is later than the current time. Ask admin to check the interval.';
+  return { workDate, punches, nextSlot, nextSegment, blockReason };
+}
+
+// A declined interval stays visible as evidence but contributes no working hours.
+export function eligibleAttendancePunches(punches = []) {
+  return groupPunches(punches).filter(group =>
+    ![group.inPunch, group.outPunch].some(punch => punch?.verification === 'REJECTED'))
+    .flatMap(group => [group.inPunch, group.outPunch].filter(Boolean));
+}
+
 // The recorded method identifies who supplied the time. Reviewers and field
 // assignments do not change the origin of an employee's original punch.
 export function punchProvenance(punch) {
@@ -178,7 +211,7 @@ export function punchProvenance(punch) {
 }
 
 export function isPayrollDayReady(punches) {
-  const segments = groupPunches(punches);
+  const segments = groupPunches(eligibleAttendancePunches(punches));
   return segments.length > 0 && segments.every(({ inPunch, outPunch }) => isPayrollReady(inPunch, outPunch));
 }
 
@@ -241,14 +274,15 @@ export function workIntervalBreakdowns(date, intervals = []) {
 export function premiumCalculationKey(date, punches) {
   // Combining reviewed daytime OT and ND is a derived total. Keep the same
   // review revision while the individual component calculations are unchanged.
-  return JSON.stringify(['actual-hours-v3-night-only', date, groupPunches(punches).map(group => [
+  return JSON.stringify(['actual-hours-v3-night-only', date, groupPunches(eligibleAttendancePunches(punches)).map(group => [
     group.inPunch?.timeUtc || null, group.outPunch?.timeUtc || null,
     group.inPunch?.scheduleStart || REGULAR_START, group.inPunch?.scheduleEnd || REGULAR_END
   ])]);
 }
 
 export function payrollDayTotals(date, punches, extension) {
-  const hours = workBreakdownIntervals(date, groupPunches(punches).map(group => ({
+  const approved = groupPunches(punches).filter(group => isPayrollReady(group.inPunch, group.outPunch));
+  const hours = workBreakdownIntervals(date, approved.map(group => ({
     inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc
   })));
   const ready = isPayrollDayReady(punches);
@@ -257,8 +291,8 @@ export function payrollDayTotals(date, punches, extension) {
   // combined OT total and must never be used to cover regular-hour undertime.
   const daytimeOvertime = ready && reviewed && extension.overtimeDecision === 'APPROVED' ? hours.remainingOvertimeMinutes : 0;
   const night = ready && reviewed && extension.nightDecision === 'APPROVED' ? hours.nightCandidateMinutes : 0;
-  return { regular: ready ? hours.regularMinutes : 0,
-    undertime: ready ? hours.undertimeMinutes : 0,
+  return { regular: approved.length ? hours.regularMinutes : 0,
+    undertime: approved.length ? hours.undertimeMinutes : 0,
     overtime: daytimeOvertime + night, night };
 }
 

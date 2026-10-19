@@ -1,7 +1,7 @@
 import { query, mutation, internalQuery, internalMutation } from './_generated/server.js';
 import { internal } from './_generated/api.js';
 import { v } from 'convex/values';
-import { cutoffFor, FLEXIBLE_START_MINUTES, FLEXIBLE_END_MINUTES, groupPunches, holidayFor, localDateTime, premiumCalculationKey, resolveWorkInterval, shiftInstant, workBreakdownIntervals } from '../rules.js';
+import { attendanceClockState, eligibleAttendancePunches, cutoffFor, groupPunches, holidayFor, localDateTime, premiumCalculationKey, resolveWorkInterval, shiftInstant, workBreakdownIntervals } from '../rules.js';
 import { audit, authUser, dateRange, dayNow, digest, distanceMeters,
   now, punchView, safeDate, settings, settingsDefault, settingsView, timezone,
   userView, validateEmployee, validEmail, normalizeUsername, validUsername } from './lib.js';
@@ -23,11 +23,19 @@ async function activeDayPunches(ctx, userId, date) {
   return rows.filter(row => row.active);
 }
 function breakdownForDay(date, punches, continuedAt, employee) {
+  punches = eligibleAttendancePunches(punches);
   const schedulePunch = groupPunches(punches).find(group => group.inPunch)?.inPunch;
   return workBreakdownIntervals(date, groupPunches(punches).map(group => ({
     inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc
   })), continuedAt, schedulePunch ? (schedulePunch.scheduleStart || '08:00') : (employee?.scheduleStart || '08:00'),
     schedulePunch ? (schedulePunch.scheduleEnd || '17:00') : (employee?.scheduleEnd || '17:00'));
+}
+async function employeeClock(ctx, user, time = now()) {
+  const date = localDateTime(time, timezone).date;
+  const previousDate = new Date(Date.parse(`${date}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+  const clock = attendanceClockState(time, await activeDayPunches(ctx, user._id, date),
+    await activeDayPunches(ctx, user._id, previousDate), settingsView(await settings(ctx)).holidays);
+  return { ...clock, punches: clock.punches.map(punch => punchView(punch, user.name)) };
 }
 async function extensionFor(ctx, userId, date) {
   return ctx.db.query('extensions').withIndex('by_user_date', q => q.eq('userId', userId).eq('workDate', date)).unique();
@@ -123,15 +131,16 @@ export const attendance = query({ args: { ...tokenArg, from: v.optional(v.string
     const range = dateRange(from, to, await settings(ctx));
     const overtime = await ctx.db.query('overtime').withIndex('by_user_date', q => q.eq('userId', user._id).gte('workDate', range.from).lte('workDate', range.to)).collect();
     const yesterday = new Date(Date.parse(`${dayNow()}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
-    const priorIn = await punchFor(ctx, user._id, yesterday, 'IN');
+    const clock = await employeeClock(ctx, user);
+    const priorIn = clock.workDate === yesterday && clock.nextSlot === 'OUT'
+      ? clock.punches.find(punch => punch.segment === clock.nextSegment && punch.slot === 'IN') : null;
     const priorExtension = await extensionFor(ctx, user._id, yesterday);
-    const openShift = now() <= shiftInstant(yesterday, '06:00', true) && priorIn &&
-      !await punchFor(ctx, user._id, yesterday, 'OUT')
-      ? { workDate: yesterday, inPunch: punchView(priorIn, user.name),
+    const openShift = priorIn
+      ? { workDate: yesterday, inPunch: priorIn,
           extension: priorExtension ? extensionView(priorExtension, user.name) : null } : null;
     return { punches: await punchRows(ctx, range.from, range.to, user._id),
       extensions: await extensionRows(ctx, range.from, range.to, user._id),
-      overtime: overtime.map(overtimeView), openShift };
+      overtime: overtime.map(overtimeView), openShift, clock };
   }
 });
 
@@ -276,17 +285,18 @@ export const continueOffsite = mutation({ args: { ...tokenArg, latitude: v.numbe
   }
 });
 
-export const autoTimeOut = internalMutation({ args: { userId: v.id('users'), workDate: v.string() },
-  handler: async (ctx, { userId, workDate }) => {
-    if (!await extensionFor(ctx, userId, workDate) ||
-        !await punchFor(ctx, userId, workDate, 'IN') || await punchFor(ctx, userId, workDate, 'OUT')) return { ok: true };
-    const inPunch = await punchFor(ctx, userId, workDate, 'IN');
+export const autoTimeOut = internalMutation({ args: { userId: v.id('users'), workDate: v.string(), segment: v.optional(v.number()) },
+  handler: async (ctx, { userId, workDate, segment }) => {
+    if (!segment && !await extensionFor(ctx, userId, workDate)) return { ok: true };
+    const group = groupPunches(await activeDayPunches(ctx, userId, workDate)).find(group => group.number === (segment || 1));
+    if (!group?.inPunch || group.outPunch) return { ok: true };
+    const inPunch = group.inPunch;
     const employee = await ctx.db.get(userId);
-    const id = await ctx.db.insert('punches', { userId, workDate, slot: 'OUT', method: 'SYSTEM',
+    const id = await ctx.db.insert('punches', { userId, workDate, segment: segment || 1, slot: 'OUT', method: 'SYSTEM',
       scheduleStart: inPunch?.scheduleStart || employee?.scheduleStart || '08:00',
       scheduleEnd: inPunch?.scheduleEnd || employee?.scheduleEnd || '17:00',
       timeUtc: shiftInstant(workDate, '06:00', true), submittedAt: now(),
-      note: 'Automatically closed at 6:00 AM; no exit selfie or GPS', verification: 'APPROVED', active: true });
+      note: 'Automatically closed at 6:00 AM; no exit selfie or GPS', verification: segment ? 'PENDING' : 'APPROVED', active: true });
     await audit(ctx, undefined, 'auto_time_out', 'punch', id, { workDate, cutoff: '06:00' });
     await syncDayPremiums(ctx, userId, workDate, undefined);
     return { ok: true };
@@ -299,42 +309,39 @@ export const submitPunch = internalMutation({ args: { ...tokenArg, input: v.any(
   const latitude = Number(input.latitude), longitude = Number(input.longitude), accuracy = Number(input.accuracyM);
   if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180 || !Number.isFinite(accuracy) || accuracy < 0) throw new Error('Current device location is required.');
   const config = await settings(ctx);
-  const local = localDateTime(now(), timezone);
-  if (input.slot === 'IN' && (local.minutes < FLEXIBLE_START_MINUTES || local.minutes > FLEXIBLE_END_MINUTES))
-    throw new Error('Time In is available between 6:00 AM and 5:00 PM. Ask admin to record exceptional work.');
-  const priorDate = new Date(Date.parse(`${local.date}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
-  const priorIn = now() <= shiftInstant(priorDate, '06:00', true) ? await punchFor(ctx, user._id, priorDate, 'IN') : null;
-  const priorOpen = priorIn && !await punchFor(ctx, user._id, priorDate, 'OUT');
-  if (input.slot === 'IN' && priorOpen)
-    throw new Error('Finish the overnight shift before starting a new Time In.');
-  const workDate = input.slot === 'OUT' && priorOpen ? priorDate : local.date;
-  const holiday = holidayFor(workDate, settingsView(config).holidays);
-  if (holiday) throw new Error(`No scheduled work today: ${holiday.name}. Ask admin to record exceptional work.`);
+  const time = now(), clock = await employeeClock(ctx, user, time);
+  if (clock.blockReason) throw new Error(clock.blockReason);
+  const workDate = clock.workDate, segment = clock.nextSegment;
+  // Old clients are limited to interval one. An explicit interval prevents a
+  // stale or repeated request from accidentally opening the following interval.
+  if (input.slot !== clock.nextSlot || (input.segment ?? 1) !== segment ||
+      input.workDate && input.workDate !== workDate)
+    throw new Error('This punch is already recorded or attendance changed. Refresh the time clock.');
   if (accuracy > config.maxAccuracyM) throw new Error(`Location accuracy must be ${config.maxAccuracyM} m or better. Please retry outdoors.`);
   const distance = config.siteLat === undefined || config.siteLng === undefined
     ? undefined : distanceMeters(latitude, longitude, config.siteLat, config.siteLng);
   const meta = await ctx.db.system.get(selfieId);
   if (!meta || !['image/jpeg', 'image/png', 'image/webp'].includes(meta.contentType) || meta.size < 1000 || meta.size > 750_000)
     throw new Error('A compressed selfie photo of 1 KB–750 KB is required.');
-  if (await punchFor(ctx, user._id, workDate, input.slot)) throw new Error('This punch is already recorded.');
-  const inPunch = await punchFor(ctx, user._id, workDate, 'IN');
+  const inPunch = clock.punches.find(punch => punch.segment === segment && punch.slot === 'IN');
   if (input.slot === 'OUT' && !inPunch) throw new Error('Time In is required before Time Out. Ask admin for a correction.');
   const method = distance !== undefined && distance <= config.radiusM ? 'ONSITE' : 'OFFSITE';
   const note = String(input.note || '').trim().slice(0, 300) || (method === 'OFFSITE' ? 'Offsite location automatically detected' : '');
-  const time = now();
   if (input.slot === 'OUT' && time <= inPunch.timeUtc) throw new Error('Time Out must be after Time In.');
-  const id = await ctx.db.insert('punches', { userId: user._id, workDate, slot: input.slot, method,
+  const id = await ctx.db.insert('punches', { userId: user._id, workDate, segment, slot: input.slot, method,
     scheduleStart: user.scheduleStart || '08:00', scheduleEnd: user.scheduleEnd || '17:00',
     timeUtc: time, submittedAt: time, latitude, longitude, accuracyM: accuracy,
     ...(distance === undefined ? {} : { distanceM: distance }), selfieId,
     note, verification: 'PENDING',
     siteVersion: config.siteVersion, active: true });
-  await audit(ctx, user._id, 'punch', 'punch', id, { slot: input.slot, method, distanceM: distance });
+  await audit(ctx, user._id, 'punch', 'punch', id, { slot: input.slot, segment, workDate, method, distanceM: distance });
+  if (input.slot === 'IN') await ctx.scheduler.runAt(Date.parse(shiftInstant(workDate, '06:00', true)),
+    internal.core.autoTimeOut, { userId: user._id, workDate, segment });
   const completedPunches = input.slot === 'OUT' ? await activeDayPunches(ctx, user._id, workDate) : [];
   const autoBreakdown = input.slot === 'OUT' ? breakdownForDay(workDate, completedPunches, null, user) : null;
   const overtimeAutoApplied = !!(autoBreakdown?.overtimeBeforeAdjustmentMinutes || autoBreakdown?.nightCandidateMinutes);
-  if (input.slot === 'OUT') await syncDayPremiums(ctx, user._id, workDate, user._id);
-  return { punch: punchView(await ctx.db.get(id), user.name), overtimeAutoApplied };
+  await syncDayPremiums(ctx, user._id, workDate, user._id);
+  return { punch: punchView(await ctx.db.get(id), user.name), overtimeAutoApplied, clock: await employeeClock(ctx, user, time) };
 }});
 
 export const backfill = mutation({ args: { ...tokenArg, input: v.any() }, handler: async (ctx, { token, input }) => {
@@ -466,7 +473,8 @@ export const saveAdminAttendanceDay = mutation({ args: { ...tokenArg, input: v.a
       segment: entry.number, slot: entry.slot, method: 'ADMIN', timeUtc: entry.timeUtc,
       scheduleStart: old ? (old.scheduleStart || '08:00') : (target.scheduleStart || '08:00'),
       scheduleEnd: old ? (old.scheduleEnd || '17:00') : (target.scheduleEnd || '17:00'),
-      submittedAt: now(), note: entry.reason, reason: entry.reason, fieldAssignment: entry.fieldAssignment, verification: 'APPROVED',
+      submittedAt: now(), note: entry.reason, reason: entry.reason, fieldAssignment: entry.fieldAssignment,
+      verification: existing.length && !oldByKey.has(`${entry.number}|IN`) ? 'PENDING' : 'APPROVED',
       assignmentType: entry.offsite ? 'OFFSITE' : 'ONSITE', createdBy: admin._id, active: true });
     await audit(ctx, admin._id, 'admin_punch_create', 'punch', id,
       { reason: entry.reason, fieldAssignment: entry.fieldAssignment, segment: entry.number, slot: entry.slot, replacedId: old?._id || null });
@@ -487,7 +495,8 @@ export const verify = mutation({ args: { ...tokenArg, id: v.string(), verificati
   if (!['ONSITE', 'OFFSITE'].includes(punch.method)) throw new Error('Only employee-submitted punches need verification.');
   await ctx.db.patch(id, { verification: args.verification, rejectionReason: args.verification === 'REJECTED' ? reason : undefined,
     reviewedBy: admin._id, reviewedAt: now() });
-  if (args.verification === 'REJECTED') {
+  await syncDayPremiums(ctx, punch.userId, punch.workDate, admin._id);
+  if (args.verification === 'REJECTED' && !eligibleAttendancePunches(await activeDayPunches(ctx, punch.userId, punch.workDate)).length) {
     const extension = await extensionFor(ctx, punch.userId, punch.workDate);
     if (extension) await ctx.db.patch(extension._id, { adjustmentDecision: 'REJECTED',
       overtimeDecision: 'REJECTED', nightDecision: 'REJECTED',
@@ -500,6 +509,33 @@ export const verify = mutation({ args: { ...tokenArg, id: v.string(), verificati
   return { ok: true };
 }});
 
+export const reviewAttendanceInterval = mutation({ args: { ...tokenArg, userId: v.string(), workDate: v.string(),
+  segment: v.number(), expectedIds: v.array(v.string()), decision: v.string(), reason: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    const admin = await authUser(ctx, args.token, 'admin');
+    const userId = ctx.db.normalizeId('users', args.userId);
+    if (!userId || !safeDate(args.workDate) || !Number.isInteger(args.segment) || args.segment < 1 || args.segment > 6)
+      throw new Error('Invalid employee, work date, or interval.');
+    if (!['APPROVED', 'REJECTED'].includes(args.decision)) throw new Error('Choose Approve or Decline.');
+    const reason = String(args.reason || '').trim();
+    if (reason.length > 300) throw new Error('Reason must have at most 300 characters.');
+    const group = groupPunches(await activeDayPunches(ctx, userId, args.workDate)).find(group => group.number === args.segment);
+    if (!group?.inPunch || !group.outPunch) throw new Error('Wait for both Time In and Time Out before reviewing this interval.');
+    const pair = [group.inPunch, group.outPunch];
+    if (args.expectedIds.length !== 2 || pair.some(punch => !args.expectedIds.includes(punch._id)))
+      throw new Error('This interval changed. Reopen the record before reviewing it.');
+    const before = pair.map(punch => ({ id: punch._id, verification: punch.verification }));
+    const reviewedAt = now();
+    for (const punch of pair) await ctx.db.patch(punch._id, { verification: args.decision,
+      rejectionReason: args.decision === 'REJECTED' ? reason : undefined, reviewedBy: admin._id, reviewedAt });
+    await syncDayPremiums(ctx, userId, args.workDate, admin._id, `Interval ${args.segment} ${args.decision.toLowerCase()}`);
+    await audit(ctx, admin._id, 'attendance_interval_review', 'attendance_day', `${userId}|${args.workDate}`, {
+      segment: args.segment, decision: args.decision, reason,
+      before, punchIds: args.expectedIds });
+    return { ok: true };
+  }
+});
+
 export const approveAttendanceDay = mutation({
   args: { ...tokenArg, userId: v.string(), workDate: v.string() },
   handler: async (ctx, args) => {
@@ -508,13 +544,13 @@ export const approveAttendanceDay = mutation({
     if (!userId || !safeDate(args.workDate)) throw new Error('Invalid employee or work date.');
     const employee = await ctx.db.get(userId);
     if (!employee || employee.role !== 'employee') throw new Error('Employee not found.');
-    const punches = await activeDayPunches(ctx, userId, args.workDate);
+    const punches = eligibleAttendancePunches(await activeDayPunches(ctx, userId, args.workDate));
     const segments = groupPunches(punches);
     if (!segments.length || segments.some(segment => !segment.inPunch || !segment.outPunch))
       throw new Error('Both Time In and Time Out are required for every interval before approval.');
     const reviewedAt = now();
     for (const punch of punches) {
-      if (['ONSITE', 'OFFSITE'].includes(punch.method)) {
+      if (punch.verification !== 'APPROVED') {
         await ctx.db.patch(punch._id, { verification: 'APPROVED', rejectionReason: undefined,
           reviewedBy: admin._id, reviewedAt });
       }
@@ -540,8 +576,9 @@ export const reviewExtension = mutation({ args: { ...tokenArg, id: v.string(), s
     extension = await ctx.db.get(id);
     if (args.calculationKey && args.calculationKey !== extension.calculationKey)
       throw new Error('Attendance calculations changed. Reload the review before approving.');
-    const punches = await activeDayPunches(ctx, extension.userId, extension.workDate);
+    const punches = eligibleAttendancePunches(await activeDayPunches(ctx, extension.userId, extension.workDate));
     const segments = groupPunches(punches);
+    if (!segments.length) throw new Error('Approve the employee Time In and Time Out proofs for an eligible interval first.');
     if (!segments.length || segments.some(segment => !segment.inPunch || !segment.outPunch))
       throw new Error('Wait for Time Out in every interval before reviewing extra hours.');
     const employee = await ctx.db.get(extension.userId);

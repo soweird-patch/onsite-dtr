@@ -2,7 +2,7 @@ import { ConvexClient, ConvexHttpClient } from 'convex/browser';
 import { api as functions } from '../convex/_generated/api.js';
 import { attendanceDetails } from './reportDetails.js';
 import { openFrontCamera, closeFrontCamera } from './selfieCamera.js';
-import { groupPunches, holidayFor, isPayrollDayReady, isPayrollReady, isScheduledWorkday,
+import { eligibleAttendancePunches, groupPunches, holidayFor, isPayrollDayReady, isPayrollReady, isScheduledWorkday,
   expectedTimeOut, localDateTime, payrollDayTotals, premiumCalculationKey, punchProvenance, resolveWorkInterval, safeDate, shiftInstant, workBreakdown, workBreakdownIntervals, workIntervalBreakdowns } from '../rules.js';
 
 const root = document.getElementById('app');
@@ -117,6 +117,8 @@ async function api(path, options = {}) {
     if (route === '/api/admin/audit') return await client.query(functions.core.auditItems, { token: accessToken });
     if (route === '/api/admin/attendance/day/approve') return await client.mutation(functions.core.approveAttendanceDay,
       { token: accessToken, userId: input.userId, workDate: input.workDate });
+    if (route === '/api/admin/attendance/interval/review') return await client.mutation(functions.core.reviewAttendanceInterval,
+      { token: accessToken, ...input });
     const verifyId = /^\/api\/admin\/punches\/(.+)\/verify$/.exec(route)?.[1];
     if (verifyId) return await client.mutation(functions.core.verify, { token: accessToken, id: verifyId, verification: input.verification, reason: input.reason || undefined });
     const extensionId = /^\/api\/admin\/extensions\/(.+)\/review$/.exec(route)?.[1];
@@ -316,10 +318,25 @@ function rangeUrl(path, range, employeeId) {
   if (employeeId) query.set('employeeId', employeeId);
   return `${path}?${query}`;
 }
-function activeWorkDate() { return state.employeeData.openShift?.workDate || today(); }
+function activeWorkDate() { return state.employeeData.clock?.workDate || state.employeeData.openShift?.workDate || today(); }
+function currentWorkPunches() {
+  if (state.employeeData.clock) return state.employeeData.clock.punches;
+  const punches = state.employeeData.punches.filter(p => p.workDate === activeWorkDate());
+  const open = state.employeeData.openShift?.inPunch;
+  if (open && !punches.some(punch => punch.id === open.id)) punches.push(open);
+  return punches;
+}
+function nextEmployeePunch() {
+  if (state.employeeData.clock) return state.employeeData.clock;
+  const last = groupPunches(currentWorkPunches()).at(-1);
+  const nextSlot = last?.inPunch && !last.outPunch ? 'OUT' : 'IN';
+  const nextSegment = nextSlot === 'OUT' ? last.number : (last?.number || 0) + 1;
+  return { workDate: activeWorkDate(), nextSlot, nextSegment,
+    blockReason: nextSegment > 6 ? 'All six intervals for this workday are complete.' : '' };
+}
 function getTodayPunch(slot) {
-  if (state.employeeData.openShift) return slot === 'IN' ? state.employeeData.openShift.inPunch : null;
-  return state.employeeData.punches.find(p => p.workDate === today() && p.slot === slot);
+  const group = groupPunches(currentWorkPunches()).at(-1);
+  return slot === 'IN' ? group?.inPunch : group?.outPunch;
 }
 function activeExtension() {
   return state.employeeData.openShift?.extension ||
@@ -331,6 +348,7 @@ function premiumBreakdown(date, inPunch, outPunch, extension, employee = state.s
     inPunch ? (inPunch.scheduleEnd || '17:00') : (employee?.scheduleEnd || '17:00'));
 }
 function dayBreakdown(date, punches, extension, employee = state.session?.user) {
+  punches = eligibleAttendancePunches(punches);
   const schedulePunch = groupPunches(punches).find(group => group.inPunch)?.inPunch;
   return workBreakdownIntervals(date, groupPunches(punches).map(group => ({
     inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc
@@ -342,7 +360,7 @@ function intervalHoursMarkup(hours) {
   return `<div class="attendance-hour-grid interval-hours"><div><span>Regular</span><strong>${h(formatMinutes(hours.regularMinutes))}</strong></div><div><span>Fills regular shortage</span><strong>${h(formatMinutes(hours.regularTopUpMinutes))}</strong></div><div><span>Remaining OT</span><strong>${h(formatMinutes(hours.overtimeCandidateMinutes))}</strong></div><div><span>Night differential</span><strong>${h(formatMinutes(hours.nightCandidateMinutes))}</strong></div></div><p class="tiny-label">OT total (remaining OT + ND): <strong>${h(formatMinutes(hours.totalOvertimeCandidateMinutes))}</strong>. Regular shortage after this interval: ${h(formatMinutes(hours.shortageAfterMinutes))}. ND never reduces undertime. Remaining OT and ND need separate admin approval.</p>`;
 }
 function intervalHoursForPunches(date, punches) {
-  return workIntervalBreakdowns(date, groupPunches(punches).map(group => ({ number: group.number,
+  return workIntervalBreakdowns(date, groupPunches(eligibleAttendancePunches(punches)).map(group => ({ number: group.number,
     inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc })));
 }
 function resolvedDraftIntervals(draft) {
@@ -385,7 +403,8 @@ function updateIntervalPreviews(form) {
   if (daySummary) daySummary.innerHTML = draftDayHoursMarkup(state.backfillDraft);
 }
 function intervalText(punches, date, slot) {
-  return groupPunches(punches).map(group => formatTime(group[slot === 'IN' ? 'inPunch' : 'outPunch']?.timeUtc)).join(' / ');
+  return groupPunches(punches).map(group => formatTime(group[slot === 'IN' ? 'inPunch' : 'outPunch']?.timeUtc) +
+    ([group.inPunch, group.outPunch].some(punch => punch?.verification === 'REJECTED') ? ' (Declined)' : '')).join(' / ');
 }
 function runningBreakdown(date, inPunch, outPunch, extension) {
   if (outPunch || !inPunch) return premiumBreakdown(date, inPunch, outPunch, extension);
@@ -394,6 +413,8 @@ function runningBreakdown(date, inPunch, outPunch, extension) {
 }
 function badge(punch) {
   if (!punch) return '<span class="pill pending">Not recorded</span>';
+  if (punch.verification === 'REJECTED') return `<span class="pill rejected">${h(punchSource(punch))} · Declined</span>`;
+  if (punch.verification === 'PENDING') return `<span class="pill pending">${h(punchSource(punch))} · Pending verification</span>`;
   if (punch.method === 'ADMIN') return '<span class="pill admin">Admin · Manual time</span>';
   if (punch.method === 'SYSTEM') return '<span class="pill admin">System · Auto-closed at 6:00 AM</span>';
   if (punch.verification === 'PENDING') return `<span class="pill pending">${h(punchSource(punch))} · Pending verification</span>`;
@@ -445,9 +466,10 @@ function statusOf(inPunch, outPunch) {
 function statusOfDay(punches) {
   const groups = groupPunches(punches);
   if (!groups.length) return 'No record';
-  if (punches.some(punch => punch.verification === 'REJECTED')) return 'Needs correction';
   if (groups.some(group => !group.inPunch || !group.outPunch)) return 'Incomplete';
-  if (punches.some(punch => punch.verification === 'PENDING')) return 'Pending verification';
+  if (eligibleAttendancePunches(punches).some(punch => punch.verification === 'PENDING')) return 'Pending verification';
+  const declined = groups.filter(group => [group.inPunch, group.outPunch].some(p => p?.verification === 'REJECTED')).length;
+  if (declined) return declined === groups.length ? 'Declined' : `Approved · ${declined} declined interval(s)`;
   return 'Present';
 }
 function minutesStatusDay(punches, employee, date) {
@@ -610,17 +632,17 @@ function renderEmployeeHome() {
   const cutoffDates = [...new Set(punches.filter(p => p.workDate >= current.start && p.workDate <= current.end).map(p => p.workDate))];
   const late = cutoffDates.reduce((n, date) => n + minutesStatusDay(punches.filter(p => p.workDate === date), user, date).late, 0);
   const undertime = cutoffDates.reduce((n, date) => n + minutesStatusDay(punches.filter(p => p.workDate === date), user, date).early, 0);
-  const action = holiday ? null : !inPunch ? 'IN' : !outPunch ? 'OUT' : null;
-  const dayPunches = punches.filter(p => p.workDate === workDate);
-  if (!dayPunches.length && inPunch) dayPunches.push(inPunch);
+  const clock = nextEmployeePunch();
+  const action = holiday || clock.blockReason ? null : clock.nextSlot;
+  const dayPunches = currentWorkPunches();
   const extra = dayBreakdown(workDate, dayPunches, extension);
   if (inPunch && !outPunch) Object.assign(extra, dayBreakdown(workDate,
     [...dayPunches, { slot: 'OUT', segment: inPunch.segment || 1, timeUtc: new Date(Math.min(Date.now(), Date.parse(shiftInstant(workDate, '06:00', true)))).toISOString() }], extension));
-  const expectedOut = expectedTimeOut(workDate, groupPunches(dayPunches).map(group => ({
+  const expectedOut = expectedTimeOut(workDate, groupPunches(eligibleAttendancePunches(dayPunches)).map(group => ({
     inUtc: group.inPunch?.timeUtc, outUtc: group.outPunch?.timeUtc
   })));
   return `<div class="hero"><p class="eyebrow">${h(prettyDate(today()))}</p><h1>${greeting()}, ${h(user.name.split(' ')[0])}</h1><p>Here's your attendance at a glance.</p></div>
-    <div class="grid employee-home-grid"><section class="card wide employee-attendance-card"><div class="employee-attendance-head"><div class="card-title"><span class="symbol">◷</span> ${state.employeeData.openShift ? 'OVERNIGHT SHIFT' : "TODAY'S ATTENDANCE"}</div><button class="attendance-view-button" data-nav="history" aria-label="View attendance history" title="View attendance history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.8"></circle></svg></button></div><div class="pill ${statusOf(inPunch,outPunch) === 'Present' ? '' : 'pending'}">${h(holiday && !inPunch && !outPunch ? `Holiday · ${holiday.name}` : statusOf(inPunch,outPunch))}</div><p class="card-sub">Work date: ${h(prettyDate(workDate))}</p>${expectedOut ? `<p class="card-sub">Expected Time Out for 8 working hours: <strong>${h(formatTime(expectedOut))}</strong>${outPunch ? '' : ' · assumes no further unpaid breaks'}</p>` : inPunch ? '<p class="card-sub">The remaining regular hours cannot be completed before 10:00 PM. Night differential is recorded separately.</p>' : '<p class="card-sub">Time In is available from 6:00 AM to 5:00 PM.</p>'}<div class="punch-line"><span>Time In</span><strong class="${inPunch ? '' : 'missing'}">${h(formatTime(inPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(inPunch)} ${h(locationText(inPunch))} ${inPunch ? mapLink(inPunch, 'Open Time In map ↗') : ''}</div><div class="punch-line"><span>Time Out</span><strong class="${outPunch ? '' : 'missing'}">${h(formatTime(outPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(outPunch)} ${h(locationText(outPunch))} ${outPunch ? mapLink(outPunch, 'Open Time Out map ↗') : ''}</div>${extension && outPunch ? `<p class="card-sub">OT total (remaining OT + ND): ${h(formatMinutes(extra.totalOvertimeCandidateMinutes))}. Remaining OT ${h(formatMinutes(extra.overtimeCandidateMinutes))} (${h(extension.overtimeDecision.toLowerCase())}) · Night differential ${h(formatMinutes(extra.nightCandidateMinutes))} (${h(extra.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}).</p>` : ''}${action ? `<div class="card-actions"><button class="btn auto-punch-button" data-action="capture-auto" data-slot="${action}"><span aria-hidden="true">◎</span> ${action === 'IN' ? 'Time In' : 'Time Out'}</button></div>` : ''}${action ? `<div class="punch-location-status ready"><span>GPS automatically marks this punch as <strong>Onsite</strong> inside the site pin or <strong>Offsite</strong> outside it.</span></div>` : ''}</section>
+    <div class="grid employee-home-grid"><section class="card wide employee-attendance-card"><div class="employee-attendance-head"><div class="card-title"><span class="symbol">◷</span> ${state.employeeData.openShift ? 'OVERNIGHT SHIFT' : "TODAY'S ATTENDANCE"} · Interval ${h(inPunch?.segment || 1)}</div><button class="attendance-view-button" data-nav="history" aria-label="View attendance history" title="View attendance history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.8"></circle></svg></button></div><div class="pill ${statusOf(inPunch,outPunch) === 'Present' ? '' : 'pending'}">${h(holiday && !inPunch && !outPunch ? `Holiday · ${holiday.name}` : statusOf(inPunch,outPunch))}</div><p class="card-sub">Work date: ${h(prettyDate(workDate))}</p>${expectedOut ? `<p class="card-sub">Expected Time Out for 8 working hours: <strong>${h(formatTime(expectedOut))}</strong>${outPunch ? '' : ' · assumes no further unpaid breaks'}</p>` : inPunch ? '<p class="card-sub">The remaining regular hours cannot be completed before 10:00 PM. Night differential is recorded separately.</p>' : '<p class="card-sub">Time In is available from 6:00 AM to 5:00 PM.</p>'}<div class="punch-line"><span>Time In</span><strong class="${inPunch ? '' : 'missing'}">${h(formatTime(inPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(inPunch)} ${h(locationText(inPunch))} ${inPunch ? mapLink(inPunch, 'Open Time In map ↗') : ''}</div><div class="punch-line"><span>Time Out</span><strong class="${outPunch ? '' : 'missing'}">${h(formatTime(outPunch?.timeUtc))}</strong></div><div class="card-sub">${badge(outPunch)} ${h(locationText(outPunch))} ${outPunch ? mapLink(outPunch, 'Open Time Out map ↗') : ''}</div>${extension && outPunch ? `<p class="card-sub">OT total (remaining OT + ND): ${h(formatMinutes(extra.totalOvertimeCandidateMinutes))}. Remaining OT ${h(formatMinutes(extra.overtimeCandidateMinutes))} (${h(extension.overtimeDecision.toLowerCase())}) · Night differential ${h(formatMinutes(extra.nightCandidateMinutes))} (${h(extra.nightCandidateMinutes ? extension.nightDecision.toLowerCase() : 'none')}).</p>` : ''}${action ? `<div class="card-actions"><button class="btn auto-punch-button" data-action="capture-auto" data-slot="${action}"><span aria-hidden="true">◎</span> ${action === 'IN' ? 'Time In' : 'Time Out'}${clock.nextSegment > 1 ? ` · Interval ${clock.nextSegment}` : ''}</button></div>` : ''}${action ? `<div class="punch-location-status ready"><span>GPS automatically marks this punch as <strong>Onsite</strong> inside the site pin or <strong>Offsite</strong> outside it.</span></div>` : ''}</section>
     <section class="card employee-cutoff-card"><div class="card-title"><span class="symbol">▤</span> CURRENT CUTOFF</div><div class="card-sub">${h(dateSpan(current))}</div><div class="metric-row"><div class="metric-cell"><div class="metric green">${days.size}</div><span class="label">Days with Time In</span></div><div class="metric-cell"><div class="metric amber">${late}</div><span class="label">Late minutes</span></div></div><p class="card-sub">Undertime: ${h(formatMinutes(undertime))}</p><button class="link-button" data-nav="history">View cutoff details ›</button></section>
     ${recentAttendanceFolders(punches)}${renderHolidayCard()}</div>
     ${inPunch && !outPunch && extra.overtimeCandidateMinutes ? `<div style="height:16px"></div><div class="notice">Current estimated overtime beyond 8 actual working hours: <strong>${h(formatMinutes(extra.overtimeCandidateMinutes))}</strong>. The final OT request is created automatically when Time Out is recorded.</div>` : ''}`;
@@ -666,15 +688,11 @@ function renderHistory() {
 }
 
 function renderCapture() {
-  const inPunch = getTodayPunch('IN'), outPunch = getTodayPunch('OUT');
-  if (inPunch && outPunch) {
-    clearCapture();
-    const hours = premiumBreakdown(activeWorkDate(), inPunch, outPunch, activeExtension());
-    return `<div class="section-head"><div><p class="eyebrow">TIME CLOCK</p><h1 class="section-title">Attendance complete</h1><p>${h(prettyDate(activeWorkDate()))}</p></div></div><section class="card clock-complete"><div class="clock-complete-mark" aria-hidden="true">✓</div><span class="pill">Completed</span><h2>Your attendance is already recorded</h2><p>Time In and Time Out for this workday are complete. Another punch cannot be submitted.</p><div class="clock-complete-times"><div><span>TIME IN</span><strong>${h(formatTime(inPunch.timeUtc))}</strong><small>${h(punchSource(inPunch))}</small>${mapLink(inPunch, 'View Time In map ↗')}</div><div><span>TIME OUT</span><strong>${h(formatTime(outPunch.timeUtc))}</strong><small>${h(punchSource(outPunch))}</small>${mapLink(outPunch, 'View Time Out map ↗')}</div></div><div class="clock-complete-summary"><span>Regular hours</span><strong>${h(formatMinutes(hours.regularMinutes))}</strong></div><div class="card-actions"><button class="btn secondary" data-nav="home">Back to home</button><button class="btn ghost" data-nav="history">View attendance records</button></div></section>`;
-  }
+  const clock = nextEmployeePunch();
+  if (clock.blockReason) return '<div class="section-head"><h1 class="section-title">Time clock</h1></div><div class="notice">'+h(clock.blockReason)+'</div><button class="btn secondary" data-nav="home">Back to home</button>';
   const holiday = holidayFor(activeWorkDate(), config().holidays);
   if (holiday) return `<div class="section-head"><div><p class="eyebrow">TIME CLOCK</p><h1 class="section-title">No work today</h1><p>${h(prettyDate(today()))} · ${h(holiday.name)}</p></div></div><div class="notice">This date is marked as a holiday. Ask an administrator to record exceptional work.</div><button class="btn secondary" data-nav="home">Back to home</button>`;
-  const c = state.capture || newCapture(getTodayPunch('IN') ? 'OUT' : 'IN');
+  const c = state.capture || newCapture(clock.nextSlot);
   state.capture = c;
   const site = config(), label = c.slot === 'IN' ? 'Time In' : 'Time Out';
   const accurate = c.location && c.location.accuracyM <= site.maxAccuracyM;
@@ -683,10 +701,10 @@ function renderCapture() {
   return `<div class="section-head"><div><p class="eyebrow">ATTENDANCE</p><h1 class="section-title">${h(label)}</h1><p>${c.selfie ? 'Review your photo and details before recording.' : 'Take a clear photo to continue.'}</p></div></div>
     <section class="card capture-review"><div class="capture-review-grid"><div class="capture-photo-panel"><div class="card-title"><span class="symbol">▣</span> PHOTO PREVIEW</div><div class="camera-box capture-review-photo">${c.selfie ? `<img src="${h(c.selfie)}" alt="${h(label)} photo preview">` : '<div class="camera-placeholder"><div class="symbol">◉</div><p>Your photo will appear here.</p></div>'}</div>
     <button class="btn secondary block" type="button" data-action="capture-photo" ${c.photoProcessing || c.submitting ? 'disabled' : ''}>${c.photoProcessing ? 'Preparing photo…' : c.selfie ? 'Retake photo' : 'Take photo'}</button>${c.photoProcessing ? '<p class="tiny-label" role="status">Preparing your photo…</p>' : ''}</div>
-    <div class="capture-details-panel"><div class="card-title"><span class="symbol">◷</span> ${h(label.toUpperCase())} PREVIEW</div><dl class="capture-preview-details"><div><dt>Employee</dt><dd>${h(state.session.user.name)}</dd></div><div><dt>Work date</dt><dd>${h(prettyDate(c.workDate))}</dd></div><div><dt>Time</dt><dd>${h(formatTime(c.previewAt))}</dd></div><div><dt>Status</dt><dd>${h(locationLabel)}</dd></div></dl><p class="tiny-label">Time is recorded when you tap Proceed.</p>
+    <div class="capture-details-panel"><div class="card-title"><span class="symbol">◷</span> ${h(label.toUpperCase())} PREVIEW</div><dl class="capture-preview-details"><div><dt>Employee</dt><dd>${h(state.session.user.name)}</dd></div><div><dt>Work date</dt><dd>${h(prettyDate(c.workDate))}</dd></div><div><dt>Work interval</dt><dd>${h(c.segment)}</dd></div><div><dt>Time</dt><dd>${h(formatTime(c.previewAt))}</dd></div><div><dt>Status</dt><dd>${h(locationLabel)}</dd></div></dl><p class="tiny-label">Time is recorded when you tap Proceed.</p>
     <div class="map-card" role="status" aria-live="polite">${c.locationPending ? '<span>Checking your location…</span>' : c.locationError ? `<span>${h(c.locationError)}</span>` : c.location ? `<strong>${c.method === 'ONSITE' ? h(site.siteName) : 'Offsite / field location'}</strong><small>GPS accuracy ±${Math.round(c.location.accuracyM)} m</small>${mapLink(c.location)}` : '<span>Location will be checked after you take a photo.</span>'}</div>
     ${!c.locationPending && (c.locationError || c.location && !accurate) ? `<div class="notice warn">${c.location && !accurate ? 'Move near a window or outdoors for a more accurate location. ' : ''}<button class="link-button" type="button" data-action="location" ${c.submitting ? 'disabled' : ''}>Retry GPS</button></div>` : ''}
-    ${c.location && c.method === 'OFFSITE' ? `<div class="field"><label for="capture-note">Offsite assignment note (optional)</label><input id="capture-note" maxlength="300" placeholder="Client, location, or task" value="${h(c.note)}" ${c.submitting ? 'disabled' : ''}></div>` : ''}</div></div>
+    ${c.segment > 1 || c.location && c.method === 'OFFSITE' ? `<div class="field"><label for="capture-note">Task / assignment note (optional)</label><input id="capture-note" maxlength="300" placeholder="Client, location, or task" value="${h(c.note)}" ${c.submitting ? 'disabled' : ''}></div>` : ''}</div></div>
     <div class="capture-review-actions"><button class="btn ghost" type="button" data-action="capture-cancel" ${c.submitting ? 'disabled' : ''}>Cancel</button><button class="btn" type="button" data-action="submit-punch" ${ready ? '' : 'disabled'} aria-busy="${!!c.submitting}">${c.submitting ? 'Recording…' : 'Proceed'}</button></div></section>`;
 }
 
@@ -774,8 +792,15 @@ function punchProofRow(p, slot) {
     : `<div class="proof-photo proof-photo-empty"><span>No selfie</span></div>`;
   return `<section class="proof-row"><div class="proof-row-head"><div><span class="proof-step">${slot === 'IN' ? '01' : '02'}</span><h3>${label}</h3></div>${badge(p)}</div><div class="proof-body"><div class="proof-data"><div class="proof-time"><span>SERVER PUNCH TIME</span><strong>${h(formatTime(p.timeUtc))}</strong><small>${h(punchSource(p))}</small></div>${location}${p.note ? `<div class="proof-note"><span>NOTE</span><p>${h(p.note)}</p></div>` : ''}${p.reason ? `<div class="proof-note"><span>REASON</span><p>${h(p.reason)}</p></div>` : ''}${p.fieldAssignment ? `<div class="proof-note"><span>FIELD ASSIGNMENT</span><p>${h(p.fieldAssignment)}</p></div>` : ''}${p.verification === 'REJECTED' ? `<div class="notice error">Rejected: ${h(p.rejectionReason)}</div>` : ''}${['ONSITE', 'OFFSITE'].includes(p.method) && p.verification !== 'APPROVED' ? `<div class="card-actions"><button class="btn small danger" data-action="verify-reject" data-id="${p.id}">Reject ${label}</button></div>` : ''}</div>${photo}</div></section>`;
 }
+function intervalReviewMarkup(group) {
+  const pair = [group.inPunch, group.outPunch].filter(Boolean);
+  if (pair.length !== 2) return '<p class="notice warn">Waiting for Time Out before this interval can be reviewed.</p>';
+  const approved = pair.every(punch => punch.verification === 'APPROVED');
+  const declined = pair.some(punch => punch.verification === 'REJECTED');
+  return `<div class="interval-review-actions"><p class="card-sub">${declined ? 'Declined interval · excluded from working hours and payroll.' : approved ? 'Interval approved. Calculated OT and night differential still require premium approval.' : 'Review this interval’s photos and GPS, then approve or decline both punches together.'}</p><div class="card-actions"><button class="btn small" data-action="interval-review" data-segment="${group.number}" data-decision="APPROVED" ${approved ? 'disabled' : ''}>Approve interval ${group.number}</button><button class="btn small danger" data-action="interval-review" data-segment="${group.number}" data-decision="REJECTED" ${declined ? 'disabled' : ''}>Decline interval ${group.number}</button></div></div>`;
+}
 function premiumReviewState(extension) {
-  const punches = state.adminData.punches.filter(p => p.userId === extension.userId && p.workDate === extension.workDate);
+  const punches = eligibleAttendancePunches(state.adminData.punches.filter(p => p.userId === extension.userId && p.workDate === extension.workDate));
   const complete = groupPunches(punches).length > 0 && groupPunches(punches).every(group => group.inPunch && group.outPunch);
   const employee = state.employees.find(item => item.id === extension.userId);
   const hours = dayBreakdown(extension.workDate, punches, extension, employee);
@@ -795,7 +820,7 @@ function renderPremiumQueue() {
     const notes = attendanceDetails([{ date: extension.workDate, punches }]).map(item =>
       `<p class="card-sub"><strong>${h(formatTime(item.inUtc))} – ${h(formatTime(item.outUtc))}</strong><br>Reason: ${h(item.reason || '—')}<br>Field Assignment: ${h(item.fieldAssignment || '—')}</p>`).join('');
     const intervalHours = intervalHoursForPunches(extension.workDate, punches).map((hours,index) =>
-      `<div><strong>Interval ${index + 1}</strong>${intervalHoursMarkup(hours)}</div>`).join('');
+      `<div><strong>Interval ${hours.number}</strong>${intervalHoursMarkup(hours)}</div>`).join('');
     const adjustmentApproved = extension.adjustmentDecision === 'APPROVED';
     const displayedRegular = hours.regularMinutes + (adjustmentApproved ? hours.proposedTransferMinutes : 0);
     const displayedShortage = Math.max(0, hours.shortageMinutes - (adjustmentApproved ? hours.proposedTransferMinutes : 0));
@@ -876,7 +901,7 @@ function reportRows() {
       else if (status === 'No record' && date === today()) status = 'Today · not recorded';
       else if (!scheduled) status = `${status} (off day)`;
       const hours = dayBreakdown(date, pair, extension, employee);
-      const payrollReady = isPayrollDayReady(pair);
+
       const approved = payrollDayTotals(date, pair, extension);
       const overtime = approved.overtime, night = approved.night;
       const currentCalculation = extension?.calculationKey === premiumCalculationKey(date, pair);
@@ -895,11 +920,11 @@ function reportRows() {
           adjustmentStatus === 'PENDING' || overtimeStatus === 'PENDING' || nightStatus === 'PENDING' || pendingOvertime || pendingNight) totals.pending++;
       const undertime = approved.undertime;
       const regular = approved.regular;
-      totals.undertime += scheduled && payrollReady ? undertime : 0;
-      totals.regular += payrollReady ? regular : 0; totals.overtime += overtime; totals.night += night;
+      totals.undertime += scheduled ? undertime : 0;
+      totals.regular += regular; totals.overtime += overtime; totals.night += night;
       totals.pendingOvertime += pendingOvertime; totals.pendingNight += pendingNight;
-      rows.push({ date, inPunch, outPunch, punches: pair, undertime: scheduled && payrollReady ? undertime : 0,
-        regular: payrollReady ? regular : 0, overtime, night, pendingOvertime, pendingNight });
+      rows.push({ date, inPunch, outPunch, punches: pair, undertime: scheduled ? undertime : 0,
+        regular, overtime, night, pendingOvertime, pendingNight });
     }
     return { employee, rows, totals };
   });
@@ -1046,9 +1071,12 @@ function showModal(modal) {
       : complete
         ? `<div class="proof-approve"><p>Review every punch time, GPS location, and photo before approval.</p><button class="btn" data-action="approve-attendance-day" data-user-id="${h(modal.punches[0].userId)}" data-work-date="${h(modal.workDate)}">Approve Daily Attendance</button></div>`
         : '<div class="notice warn proof-payroll-status">Time In and Time Out must be recorded for every interval before this day can be approved for payroll.</div>';
-    holder.innerHTML = `<div class="modal-backdrop"><div class="modal proof-modal" role="dialog" aria-modal="true" aria-labelledby="proof-day-title"><div class="modal-head"><div><p class="modal-kicker">DAILY ATTENDANCE REVIEW</p><h2 id="proof-day-title">${h(modal.employeeName)}</h2><p>${h(prettyDate(modal.workDate))}</p></div><button class="close" data-action="modal-close" aria-label="Close daily proof">×</button></div><div class="proof-rows">${segments.map((group, index) => `<h3 class="proof-interval-title">Work interval ${index + 1}</h3>${punchProofRow(group.inPunch, 'IN')}${punchProofRow(group.outPunch, 'OUT')}`).join('')}</div>${reviewAction}<button class="btn secondary small" data-action="edit-record-day" data-user-id="${h(modal.punches[0]?.userId)}" data-work-date="${h(modal.workDate)}">Edit or add interval</button></div></div>`;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal proof-modal" role="dialog" aria-modal="true" aria-labelledby="proof-day-title"><div class="modal-head"><div><p class="modal-kicker">DAILY ATTENDANCE REVIEW</p><h2 id="proof-day-title">${h(modal.employeeName)}</h2><p>${h(prettyDate(modal.workDate))}</p></div><button class="close" data-action="modal-close" aria-label="Close daily proof">×</button></div><div class="proof-rows">${segments.map(group => `<h3 class="proof-interval-title">Work interval ${group.number}</h3>${punchProofRow(group.inPunch, 'IN')}${punchProofRow(group.outPunch, 'OUT')}${intervalReviewMarkup(group)}`).join('')}</div>${reviewAction}<button class="btn secondary small" data-action="edit-record-day" data-user-id="${h(modal.punches[0]?.userId)}" data-work-date="${h(modal.workDate)}">Edit or add interval</button></div></div>`;
+  } else if (modal.kind === 'interval-review') {
+    const label = modal.decision === 'APPROVED' ? 'Approve' : 'Decline';
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-label="Review work interval"><div class="modal-head"><h2>${label} interval ${h(modal.segment)}?</h2><button class="close" data-action="modal-close" aria-label="Close">×</button></div><p>${h(modal.employeeName)} · ${h(prettyDate(modal.workDate))}</p><p>${h(formatTime(modal.inTime))} – ${h(formatTime(modal.outTime))}</p><p class="card-sub">${modal.decision === 'APPROVED' ? 'Approve both punches for this interval. OT and night differential remain subject to their separate premium review.' : 'Exclude this interval from working hours and payroll. Its punches, photos, and review history remain saved.'}</p><form id="interval-review-form"><div class="field"><label for="interval-review-reason">Reason (optional)</label><textarea id="interval-review-reason" name="reason" maxlength="300"></textarea></div><button class="btn block ${modal.decision === 'REJECTED' ? 'danger' : ''}" type="submit">${label} interval</button></form></div></div>`;
   } else if (modal.kind === 'approve-day') {
-    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="approve-day-title"><div class="modal-head"><div><p class="modal-kicker">CONFIRM ATTENDANCE</p><h2 id="approve-day-title">Approve regular attendance?</h2></div><button class="close" data-action="modal-close" aria-label="Close attendance approval">×</button></div><p><strong>${h(modal.employeeName)}</strong> · ${h(prettyDate(modal.workDate))}</p><div class="notice">This approves all Time In and Time Out proof for the day. Regular hours and undertime enter payroll; work beyond 8 actual working hours, up to 10:00 PM, remains pending OT. Night differential from 10:00 PM to 6:00 AM needs separate approval.</div><form id="approve-day-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Approve Regular Time</button></div></form></div></div>`;
+    holder.innerHTML = `<div class="modal-backdrop"><div class="modal account-modal review-modal" role="dialog" aria-modal="true" aria-labelledby="approve-day-title"><div class="modal-head"><div><p class="modal-kicker">CONFIRM ATTENDANCE</p><h2 id="approve-day-title">Approve regular attendance?</h2></div><button class="close" data-action="modal-close" aria-label="Close attendance approval">×</button></div><p><strong>${h(modal.employeeName)}</strong> · ${h(prettyDate(modal.workDate))}</p><div class="notice">This approves the remaining eligible Time In and Time Out proof. Declined intervals stay excluded. Regular hours and undertime enter payroll; work beyond 8 actual working hours, up to 10:00 PM, remains pending OT. Night differential from 10:00 PM to 6:00 AM needs separate approval.</div><form id="approve-day-form"><div class="modal-actions"><button class="btn ghost" type="button" data-action="modal-close">Go back</button><button class="btn" type="submit">Approve Regular Time</button></div></form></div></div>`;
   } else if (modal.kind === 'premium') {
     const { extension, stage, decision } = modal;
     const pin = extension.latitude == null ? '<p class="card-sub">Calculated from attendance intervals. Open the daily attendance record to review punch proof.</p>'
@@ -1087,9 +1115,9 @@ async function loadProofSelfies(punches) {
   }));
 }
 function newCapture(slot, location = null) {
-  return { slot, userId: state.session.user.id, workDate: activeWorkDate(),
+  return { slot, segment: nextEmployeePunch().nextSegment, userId: state.session.user.id, workDate: activeWorkDate(),
     method: detectedPunchMethod(location, activeExtension()), location,
-    selfie: null, selfieBytes: null, previewAt: null, note: getTodayPunch('IN')?.note || '',
+    selfie: null, selfieBytes: null, previewAt: null, note: slot === 'OUT' ? getTodayPunch('IN')?.note || '' : '',
     cameraOpen: false, photoProcessing: false, locationPending: false, locationError: '', submitting: false };
 }
 function captureReady(c = state.capture) {
@@ -1120,9 +1148,9 @@ function beginDeviceCapture(slot, location = null) {
   if (state.capture?.submitting) return;
   if (!navigator.onLine) throw new Error('Connect to the internet before recording attendance.');
   if (holidayFor(activeWorkDate(), config().holidays)) throw new Error('No work is scheduled today. Ask an administrator to record exceptional work.');
-  const inPunch = getTodayPunch('IN'), outPunch = getTodayPunch('OUT');
-  if (inPunch && outPunch) throw new Error('Today’s Time In and Time Out are already complete.');
-  if (slot !== (inPunch ? 'OUT' : 'IN')) throw new Error('Attendance changed. Open the time clock again.');
+  const clock = nextEmployeePunch();
+  if (clock.blockReason) throw new Error(clock.blockReason);
+  if (slot !== clock.nextSlot) throw new Error('Attendance changed. Open the time clock again.');
   closeModal();
   closeFrontCamera();
   state.capture = newCapture(slot, location); state.section = 'capture'; state.message = '';
@@ -1216,7 +1244,10 @@ async function submitPunch() {
   const c = state.capture;
   if (c?.submitting) return;
   if (!navigator.onLine) throw new Error('Offline. Attendance was not saved. Reconnect and try again.');
-  if (getTodayPunch('IN') && getTodayPunch('OUT')) throw new Error('Today’s Time In and Time Out are already complete.');
+  const clock = nextEmployeePunch();
+  if (clock.blockReason) throw new Error(clock.blockReason);
+  if (c && (c.segment !== clock.nextSegment || c.slot !== clock.nextSlot || c.workDate !== clock.workDate))
+    throw new Error('Attendance changed. Open the time clock again.');
   if (!captureReady(c)) throw new Error('Take a photo and finish the location check before proceeding.');
   c.note = document.getElementById('capture-note')?.value || c.note || '';
   c.submitting = true; renderView();
@@ -1227,11 +1258,12 @@ async function submitPunch() {
     if (c.location.accuracyM > config().maxAccuracyM) throw new Error('Location is not accurate enough. Retry GPS before proceeding.');
     c.method = detectedPunchMethod(c.location, activeExtension());
     if (c.method === 'OFFSITE' && c.note.trim().length < 3) c.note = 'Offsite location automatically detected';
-    const result = await api('/api/punch', { method: 'POST', body: JSON.stringify({ slot: c.slot, method: c.method,
+    const result = await api('/api/punch', { method: 'POST', body: JSON.stringify({ slot: c.slot, segment: c.segment, workDate: c.workDate, method: c.method,
       latitude: c.location.latitude, longitude: c.location.longitude, accuracyM: c.location.accuracyM,
       selfie: c.selfie, note: c.note }) });
     if (!state.session || state.session.user.id !== c.userId) return;
     state.employeeData.punches = [...state.employeeData.punches.filter(punch => punch.id !== result.punch.id), result.punch];
+    if (result.clock) state.employeeData.clock = result.clock;
     if (c.slot === 'OUT' && state.employeeData.openShift?.workDate === result.punch.workDate) state.employeeData.openShift = null;
     clearCapture();
     try { await loadEmployee(currentRange()); } catch { /* The server receipt already confirms this punch. */ }
@@ -1366,6 +1398,16 @@ document.addEventListener('click', async event => {
         employeeName, punches });
       return;
     }
+    if (action === 'interval-review') {
+      const context = state.modal;
+      if (context?.kind !== 'record-day') return;
+      const group = groupPunches(context.punches).find(group => group.number === Number(node.dataset.segment));
+      if (!group?.inPunch || !group.outPunch) throw new Error('Wait for Time Out before reviewing this interval.');
+      showModal({ kind: 'interval-review', userId: group.inPunch.userId, workDate: context.workDate,
+        employeeName: context.employeeName, segment: group.number, decision: node.dataset.decision,
+        expectedIds: [group.inPunch.id, group.outPunch.id], inTime: group.inPunch.timeUtc, outTime: group.outPunch.timeUtc });
+      return;
+    }
     if (action === 'verify-approve' || action === 'verify-reject') {
       const verification = action === 'verify-approve' ? 'APPROVED' : 'REJECTED';
       const reason = verification === 'REJECTED' ? window.prompt('Reason for rejection (optional):') : '';
@@ -1498,6 +1540,18 @@ document.addEventListener('submit', async event => {
       const holidays = config().customHolidays.filter(holiday => holiday.date !== values.date);
       await api('/api/admin/holidays', { method: 'PUT', body: JSON.stringify({ holidays }) });
       await refreshSession(); closeModal(); renderView(); return flash('Holiday removed.', 'success');
+    }
+    if (id === 'interval-review-form') {
+      const review = state.modal;
+      if (review?.kind !== 'interval-review') throw new Error('Reopen the interval to review it.');
+      await api('/api/admin/attendance/interval/review', { method: 'POST', body: JSON.stringify({
+        userId: review.userId, workDate: review.workDate, segment: review.segment,
+        expectedIds: review.expectedIds, decision: review.decision, reason: values.reason }) });
+      closeModal(); await loadAdmin(state.adminRange || currentRange()); renderView();
+      const punches = state.adminData.punches.filter(punch => punch.userId === review.userId && punch.workDate === review.workDate);
+      showModal({ kind: 'record-day', punches, employeeName: review.employeeName, workDate: review.workDate });
+      await loadProofSelfies(punches);
+      return flash(`Interval ${review.segment} ${review.decision === 'APPROVED' ? 'approved' : 'declined'}.`, 'success');
     }
     if (id === 'approve-day-form') {
       const pending = state.modal;
