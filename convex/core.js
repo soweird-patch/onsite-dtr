@@ -399,6 +399,30 @@ export const backfill = mutation({ args: { ...tokenArg, input: v.any() }, handle
   return { ok: true, replaced };
 }});
 
+export const resetAttendanceDay = mutation({ args: { ...tokenArg, userId: v.id('users'),
+  workDate: v.string(), expectedIds: v.array(v.string()), reason: v.optional(v.string()) },
+handler: async (ctx, { token, userId, workDate, expectedIds, reason = '' }) => {
+  const admin = await authUser(ctx, token, 'admin');
+  const employee = await ctx.db.get(userId);
+  if (!employee || employee.role !== 'employee') throw new Error('Employee not found.');
+  if (!safeDate(workDate)) throw new Error('Valid work date is required.');
+  reason = reason.trim();
+  if (reason.length > 300) throw new Error('Reason must have at most 300 characters.');
+  const punches = await activeDayPunches(ctx, userId, workDate);
+  const actual = punches.map(p => String(p._id)).sort();
+  const expected = [...expectedIds].sort();
+  if (!actual.length || actual.length !== expected.length || actual.some((id, i) => id !== expected[i]))
+    throw new Error('Attendance changed. Reopen the current record before resetting.');
+  const extensions = await ctx.db.query('extensions').withIndex('by_user_date', q => q.eq('userId', userId).eq('workDate', workDate)).collect();
+  const overtime = await ctx.db.query('overtime').withIndex('by_user_date', q => q.eq('userId', userId).eq('workDate', workDate)).collect();
+  await audit(ctx, admin._id, 'attendance_day_reset', 'attendance_day', `${userId}|${workDate}`,
+    { employeeName: employee.name, workDate, reason, punches, extensions, overtime });
+  // Retain original proof for auditing, but exclude every interval from attendance and payroll.
+  for (const punch of punches) await ctx.db.patch(punch._id, { active: false });
+  for (const row of [...extensions, ...overtime]) await ctx.db.delete(row._id);
+  return { ok: true };
+}});
+
 export const saveAdminAttendanceDay = mutation({ args: { ...tokenArg, input: v.any() }, handler: async (ctx, { token, input }) => {
   const admin = await authUser(ctx, token, 'admin');
   const targetId = ctx.db.normalizeId('users', String(input.employeeId || ''));

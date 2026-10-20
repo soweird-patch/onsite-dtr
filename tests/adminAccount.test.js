@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { deleteAdminAccount, deleteEmployee, registerFirstAdmin, signupStatus, updateProfileImage } from '../convex/core.js';
+import { resetAttendanceDay, autoTimeOut, deleteAdminAccount, deleteEmployee, registerFirstAdmin, signupStatus, updateProfileImage } from '../convex/core.js';
 import { deleteAdminAccount as deleteAction, registerFirstAdmin as signupAction } from '../convex/authActions.js';
 
 function fakeContext() {
@@ -112,4 +112,44 @@ test('signup action accepts a profile image and deletion requires the password',
   await deleteAction._handler(ctx, { token: signedUp.token, password: 'a-long-unique-password', confirmation: 'DELETE' });
   assert.equal(deleteArgs.token, signedUp.token);
   assert.equal(deleteArgs.oldHash, signupArgs.passwordHash);
+});
+
+
+test('reset selected past attendance clears all intervals and premiums, preserves proof and other days', async () => {
+  const { ctx, tables } = fakeContext();
+  const token = 'e'.repeat(64);
+  const admin = await ctx.db.insert('users', { name: 'Admin', role: 'admin', active: true });
+  const employee = await ctx.db.insert('users', { name: 'Worker', role: 'employee', active: true });
+  await ctx.db.insert('sessions', { userId: admin, tokenHash: createHash('sha256').update(token).digest('hex'), expiresAt: Date.now() + 86400000 });
+  const workDate = '2026-09-01';
+  const ids = [];
+  for (const [segment, slot] of [[1, 'IN'], [1, 'OUT'], [2, 'IN']]) {
+    ids.push(await ctx.db.insert('punches', { userId: employee, workDate, segment, slot,
+      active: true, verification: 'APPROVED', selfieId: 'photo:original', timeUtc: `${workDate}T01:00:00Z` }));
+  }
+  const otherDay = await ctx.db.insert('punches', { userId: employee, workDate: '2026-09-02', active: true });
+  const otherEmployee = await ctx.db.insert('punches', { userId: 'users:other', workDate, active: true });
+  await ctx.db.insert('extensions', { userId: employee, workDate, overtimeDecision: 'APPROVED', nightDecision: 'APPROVED' });
+  await ctx.db.insert('overtime', { userId: employee, workDate, minutes: 120 });
+  const otherPremium = await ctx.db.insert('extensions', { userId: employee, workDate: '2026-09-02' });
+  const args = { token, userId: employee, workDate, expectedIds: ids, reason: '' };
+  await assert.rejects(resetAttendanceDay._handler(ctx, { ...args, expectedIds: ids.slice(1) }), /Attendance changed/);
+  assert(ids.every(id => tables.punches.get(id).active));
+  await resetAttendanceDay._handler(ctx, args);
+  assert(ids.every(id => !tables.punches.get(id).active && tables.punches.get(id).selfieId === 'photo:original'));
+  assert(tables.punches.get(otherDay).active);
+  assert(tables.punches.get(otherEmployee).active);
+  assert.equal(tables.extensions.size, 1);
+  assert(tables.extensions.has(otherPremium));
+  assert.equal(tables.overtime.size, 0);
+  const audit = [...tables.audit.values()].find(row => row.action === 'attendance_day_reset');
+  assert.equal(audit.actorId, admin);
+  assert.equal(audit.details.punches.length, 3);
+  assert.equal(audit.details.extensions[0].overtimeDecision, 'APPROVED');
+  const count = tables.punches.size;
+  await autoTimeOut._handler(ctx, { userId: employee, workDate, segment: 2 });
+  assert.equal(tables.punches.size, count, 'scheduled close must not recreate a cleared punch');
+  await assert.rejects(resetAttendanceDay._handler(ctx, args), /Attendance changed/);
+  await ctx.db.patch(admin, { role: 'employee' });
+  await assert.rejects(resetAttendanceDay._handler(ctx, args), /Not allowed/);
 });
